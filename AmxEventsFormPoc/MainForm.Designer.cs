@@ -26,11 +26,11 @@ partial class MainForm
         components = new System.ComponentModel.Container();
         System.ComponentModel.ComponentResourceManager resources = new System.ComponentModel.ComponentResourceManager(typeof(MainForm));
         pnlStatus = new FlowLayoutPanel();
-        lblBroker = new Label();
         btBack = new Button();
         btForward = new Button();
         btEvents = new Button();
         btHistory = new Button();
+        lblBroker = new Label();
         lblPanels = new Label();
         lblMeta = new Label();
         menuStrip1 = new MenuStrip();
@@ -59,15 +59,23 @@ partial class MainForm
         ((System.ComponentModel.ISupportInitialize)eventsGrid).BeginInit();
         contextMenuStrip1.SuspendLayout();
         SuspendLayout();
-        // 
+        //
         // pnlStatus
-        // 
-        pnlStatus.BackColor = Color.FromArgb(228, 227, 216);
-        pnlStatus.Controls.Add(lblBroker);
+        //
+        // Controls are added in the order they should appear, left to right (this is a
+        // FlowLayoutPanel — actual on-screen position follows THIS order, not each
+        // control's own Location/Margin, which the Designer keeps around but the flow
+        // layout overrides at runtime). The four nav buttons come first, right after
+        // the panel's own left Padding, so they sit flush against the left edge; the
+        // three status labels (currently always empty — nothing in MainForm.cs sets
+        // their Text yet) come after, so once they do get real broker/panel text later,
+        // growing that text pushes rightward into empty space instead of shifting the
+        // buttons.
         pnlStatus.Controls.Add(btBack);
         pnlStatus.Controls.Add(btForward);
         pnlStatus.Controls.Add(btEvents);
         pnlStatus.Controls.Add(btHistory);
+        pnlStatus.Controls.Add(lblBroker);
         pnlStatus.Controls.Add(lblPanels);
         pnlStatus.Controls.Add(lblMeta);
         pnlStatus.Dock = DockStyle.Top;
@@ -77,19 +85,9 @@ partial class MainForm
         pnlStatus.Size = new Size(1500, 66);
         pnlStatus.TabIndex = 2;
         pnlStatus.WrapContents = false;
-        // 
-        // lblBroker
-        // 
-        lblBroker.AutoSize = true;
-        lblBroker.ForeColor = Color.FromArgb(200, 90, 90);
-        lblBroker.Location = new Point(8, 10);
-        lblBroker.Margin = new Padding(0, 4, 24, 0);
-        lblBroker.Name = "lblBroker";
-        lblBroker.Size = new Size(0, 15);
-        lblBroker.TabIndex = 0;
-        // 
+        //
         // btBack
-        // 
+        //
         btBack.Font = new Font("Segoe UI", 7F);
         btBack.Image = (Image)resources.GetObject("btBack.Image");
         btBack.Location = new Point(32, 6);
@@ -101,9 +99,9 @@ partial class MainForm
         btBack.TextAlign = ContentAlignment.BottomCenter;
         btBack.TextImageRelation = TextImageRelation.ImageAboveText;
         btBack.UseVisualStyleBackColor = true;
-        // 
+        //
         // btForward
-        // 
+        //
         btForward.Font = new Font("Segoe UI", 7F);
         btForward.Image = (Image)resources.GetObject("btForward.Image");
         btForward.Location = new Point(82, 6);
@@ -115,9 +113,9 @@ partial class MainForm
         btForward.TextAlign = ContentAlignment.BottomCenter;
         btForward.TextImageRelation = TextImageRelation.ImageAboveText;
         btForward.UseVisualStyleBackColor = true;
-        // 
+        //
         // btEvents
-        // 
+        //
         btEvents.Font = new Font("Segoe UI", 7F);
         btEvents.Image = (Image)resources.GetObject("btEvents.Image");
         btEvents.Location = new Point(132, 6);
@@ -129,9 +127,9 @@ partial class MainForm
         btEvents.TextAlign = ContentAlignment.BottomCenter;
         btEvents.TextImageRelation = TextImageRelation.ImageAboveText;
         btEvents.UseVisualStyleBackColor = true;
-        // 
+        //
         // btHistory
-        // 
+        //
         btHistory.Font = new Font("Segoe UI", 7F);
         btHistory.Image = (Image)resources.GetObject("btHistory.Image");
         btHistory.Location = new Point(182, 6);
@@ -144,9 +142,19 @@ partial class MainForm
         btHistory.TextImageRelation = TextImageRelation.ImageAboveText;
         btHistory.UseVisualStyleBackColor = true;
         btHistory.Click += btHistory_Click;
-        // 
+        //
+        // lblBroker
+        //
+        lblBroker.AutoSize = true;
+        lblBroker.ForeColor = Color.FromArgb(200, 90, 90);
+        lblBroker.Location = new Point(8, 10);
+        lblBroker.Margin = new Padding(0, 4, 24, 0);
+        lblBroker.Name = "lblBroker";
+        lblBroker.Size = new Size(0, 15);
+        lblBroker.TabIndex = 0;
+        //
         // lblPanels
-        // 
+        //
         lblPanels.AutoSize = true;
         lblPanels.ForeColor = Color.FromArgb(90, 190, 120);
         lblPanels.Location = new Point(232, 10);
@@ -154,9 +162,9 @@ partial class MainForm
         lblPanels.Name = "lblPanels";
         lblPanels.Size = new Size(0, 15);
         lblPanels.TabIndex = 1;
-        // 
+        //
         // lblMeta
-        // 
+        //
         lblMeta.AutoSize = true;
         lblMeta.ForeColor = Color.Gainsboro;
         lblMeta.Location = new Point(256, 10);
@@ -164,84 +172,84 @@ partial class MainForm
         lblMeta.Name = "lblMeta";
         lblMeta.Size = new Size(0, 15);
         lblMeta.TabIndex = 2;
-        // 
+        //
         // menuStrip1
-        // 
+        //
         menuStrip1.Items.AddRange(new ToolStripItem[] { mainMenuToolStripMenuItem, smartToolStripMenuItem, managementToolStripMenuItem, engineerToolStripMenuItem, windowToolStripMenuItem, helpToolStripMenuItem });
         menuStrip1.Location = new Point(0, 0);
         menuStrip1.Name = "menuStrip1";
         menuStrip1.Size = new Size(1500, 24);
         menuStrip1.TabIndex = 3;
         menuStrip1.Text = "menuStrip1";
-        // 
+        //
         // mainMenuToolStripMenuItem
-        // 
+        //
         mainMenuToolStripMenuItem.DropDownItems.AddRange(new ToolStripItem[] { logOffToolStripMenuItem });
         mainMenuToolStripMenuItem.Name = "mainMenuToolStripMenuItem";
         mainMenuToolStripMenuItem.Size = new Size(80, 20);
         mainMenuToolStripMenuItem.Text = "&Main Menu";
-        // 
+        //
         // logOffToolStripMenuItem
-        // 
+        //
         logOffToolStripMenuItem.Name = "logOffToolStripMenuItem";
         logOffToolStripMenuItem.Size = new Size(114, 22);
         logOffToolStripMenuItem.Text = "Log Off";
-        // 
+        //
         // smartToolStripMenuItem
-        // 
+        //
         smartToolStripMenuItem.DropDownItems.AddRange(new ToolStripItem[] { serviceReportsToolStripMenuItem });
         smartToolStripMenuItem.Name = "smartToolStripMenuItem";
         smartToolStripMenuItem.Size = new Size(50, 20);
         smartToolStripMenuItem.Text = "Smart";
-        // 
+        //
         // serviceReportsToolStripMenuItem
-        // 
+        //
         serviceReportsToolStripMenuItem.DropDownItems.AddRange(new ToolStripItem[] { contractCompletionReportToolStripMenuItem });
         serviceReportsToolStripMenuItem.Name = "serviceReportsToolStripMenuItem";
         serviceReportsToolStripMenuItem.Size = new Size(154, 22);
         serviceReportsToolStripMenuItem.Text = "Service Reports";
-        // 
+        //
         // contractCompletionReportToolStripMenuItem
-        // 
+        //
         contractCompletionReportToolStripMenuItem.Name = "contractCompletionReportToolStripMenuItem";
         contractCompletionReportToolStripMenuItem.Size = new Size(224, 22);
         contractCompletionReportToolStripMenuItem.Text = "Contract Completion Report";
-        // 
+        //
         // managementToolStripMenuItem
-        // 
+        //
         managementToolStripMenuItem.Name = "managementToolStripMenuItem";
         managementToolStripMenuItem.Size = new Size(90, 20);
         managementToolStripMenuItem.Text = "Management";
-        // 
+        //
         // engineerToolStripMenuItem
-        // 
+        //
         engineerToolStripMenuItem.Name = "engineerToolStripMenuItem";
         engineerToolStripMenuItem.Size = new Size(65, 20);
         engineerToolStripMenuItem.Text = "Engineer";
-        // 
+        //
         // windowToolStripMenuItem
-        // 
+        //
         windowToolStripMenuItem.Name = "windowToolStripMenuItem";
         windowToolStripMenuItem.Size = new Size(63, 20);
         windowToolStripMenuItem.Text = "Window";
-        // 
+        //
         // helpToolStripMenuItem
-        // 
+        //
         helpToolStripMenuItem.DropDownItems.AddRange(new ToolStripItem[] { aboutToolStripMenuItem });
         helpToolStripMenuItem.Name = "helpToolStripMenuItem";
         helpToolStripMenuItem.Size = new Size(44, 20);
         helpToolStripMenuItem.Text = "&Help";
         helpToolStripMenuItem.Click += helpToolStripMenuItem_Click;
-        // 
+        //
         // aboutToolStripMenuItem
-        // 
+        //
         aboutToolStripMenuItem.Name = "aboutToolStripMenuItem";
         aboutToolStripMenuItem.Size = new Size(107, 22);
         aboutToolStripMenuItem.Text = "&About";
         aboutToolStripMenuItem.Click += aboutToolStripMenuItem_Click;
-        // 
+        //
         // pnlToolbar
-        // 
+        //
         pnlToolbar.Controls.Add(txtFilter);
         pnlToolbar.Dock = DockStyle.Top;
         pnlToolbar.Location = new Point(0, 90);
@@ -250,18 +258,18 @@ partial class MainForm
         pnlToolbar.Size = new Size(1500, 40);
         pnlToolbar.TabIndex = 1;
         pnlToolbar.WrapContents = false;
-        // 
+        //
         // txtFilter
-        // 
+        //
         txtFilter.Location = new Point(8, 9);
         txtFilter.Margin = new Padding(0, 3, 12, 3);
         txtFilter.Name = "txtFilter";
         txtFilter.PlaceholderText = "Filter by panel, type, text or AMX ref";
         txtFilter.Size = new Size(280, 23);
         txtFilter.TabIndex = 0;
-        // 
+        //
         // pnlFooter
-        // 
+        //
         pnlFooter.BackColor = Color.FromArgb(240, 240, 250);
         pnlFooter.Controls.Add(lblActive);
         pnlFooter.Dock = DockStyle.Bottom;
@@ -271,9 +279,9 @@ partial class MainForm
         pnlFooter.Size = new Size(1500, 26);
         pnlFooter.TabIndex = 3;
         pnlFooter.WrapContents = false;
-        // 
+        //
         // lblActive
-        // 
+        //
         lblActive.AutoSize = true;
         lblActive.ForeColor = Color.Black;
         lblActive.Location = new Point(8, 7);
@@ -282,9 +290,9 @@ partial class MainForm
         lblActive.Size = new Size(45, 15);
         lblActive.TabIndex = 0;
         lblActive.Text = "0 Event";
-        // 
+        //
         // eventsGrid
-        // 
+        //
         eventsGrid.AllowUserToAddRows = false;
         eventsGrid.AllowUserToDeleteRows = false;
         eventsGrid.Dock = DockStyle.Fill;
@@ -297,29 +305,29 @@ partial class MainForm
         eventsGrid.Size = new Size(1500, 676);
         eventsGrid.TabIndex = 0;
         eventsGrid.CellContextMenuStripNeeded += eventsGrid_CellContextMenuStripNeeded;
-        // 
+        //
         // contextMenuStrip1
-        // 
+        //
         contextMenuStrip1.Items.AddRange(new ToolStripItem[] { acceptToolStripMenuItem, clearTheAlarmToolStripMenuItem });
         contextMenuStrip1.Name = "contextMenuStrip1";
         contextMenuStrip1.Size = new Size(167, 48);
-        // 
+        //
         // acceptToolStripMenuItem
-        // 
+        //
         acceptToolStripMenuItem.Name = "acceptToolStripMenuItem";
         acceptToolStripMenuItem.Size = new Size(166, 22);
         acceptToolStripMenuItem.Text = "Accept the Alarm";
         acceptToolStripMenuItem.Click += acceptToolStripMenuItem_Click;
-        // 
+        //
         // clearTheAlarmToolStripMenuItem
-        // 
+        //
         clearTheAlarmToolStripMenuItem.Name = "clearTheAlarmToolStripMenuItem";
         clearTheAlarmToolStripMenuItem.Size = new Size(166, 22);
         clearTheAlarmToolStripMenuItem.Text = "Clear the Alarm";
         clearTheAlarmToolStripMenuItem.Click += clearTheAlarmToolStripMenuItem_Click;
-        // 
+        //
         // MainForm
-        // 
+        //
         ClientSize = new Size(1500, 832);
         Controls.Add(eventsGrid);
         Controls.Add(pnlToolbar);

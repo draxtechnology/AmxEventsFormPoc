@@ -13,6 +13,11 @@ namespace AmxEventsFormPoc.Models;
 // if it's not currently shown as a column (Ext, TypeId, Value, InputType, Raw).
 public sealed class DraxEventRow
 {
+    // The SQLite row's primary key (Services/EventsRepository.cs). 0 until the row has
+    // actually been inserted — Accept(long id) and the "clear" action both need this to
+    // know which database row a given grid row corresponds to.
+    public long Id { get; set; }
+
     public long Seq { get; set; }
     public DateTime ReceivedLocal { get; set; }
     public string Panel { get; set; } = "";

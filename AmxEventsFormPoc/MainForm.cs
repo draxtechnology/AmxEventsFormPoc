@@ -12,9 +12,63 @@ namespace AmxEventsFormPoc;
 
 public partial class MainForm : Form
 {
+    // POC-level only: this proves the database is genuinely encrypted (see
+    // EventsRepository.Initialize/SetKey/Rekey) so it's demonstrable today, but a fixed
+    // string in source code is readable by anyone with the built .exe (or this file) —
+    // it is NOT where a real deployment's key should live. Before this goes near real
+    // site data, move it to something per-install and not shipped in the binary, e.g.
+    // Windows DPAPI (System.Security.Cryptography.ProtectedData) writing a generated
+    // key out to a file under LocalApplicationData the first time the app runs, or the
+    // Windows Credential Manager.
+    private const string EventsDbEncryptionKey = "Drax-AmxEventsFormPoc-POC-Key-Change-Me";
+
     private readonly List<DraxEventRow> _allEvents = new();
     private readonly BindingList<DraxEventRow> _visibleEvents = new();
     private MqttEventsClient _mqtt = null!; // not readonly — assigned in OnLoad, not the constructor
+    private EventsRepository _repo = null!; // not readonly — assigned in OnLoad, not the constructor
+
+    // --- History page: a second "page" that swaps into the same space eventsGrid
+    //     occupies, rather than a separate window — btHistory hides eventsGrid and
+    //     shows this instead; btBack swaps back. Built entirely in code, same as
+    //     eventsGrid's own columns, and for the same reason (see the comment on
+    //     ConfigureEventsGridColumns below). ---
+    private readonly Panel pnlHistoryPage = new() { Dock = DockStyle.Fill, Visible = false };
+    private readonly Panel pnlHistoryFilter = new() { Dock = DockStyle.Top, Height = 50 };
+    private readonly DataGridView historyGrid = new()
+    {
+        Dock = DockStyle.Fill,
+        ReadOnly = true,
+        AllowUserToAddRows = false,
+        AllowUserToDeleteRows = false,
+        AutoGenerateColumns = false,
+        RowHeadersWidth = 25,
+    };
+    private readonly Label lblHistoryFrom = new() { Text = "From", AutoSize = true, Location = new Point(10, 16) };
+    private readonly DateTimePicker dtHistoryFrom = new()
+    {
+        Format = DateTimePickerFormat.Short,
+        Location = new Point(50, 12),
+        Size = new Size(120, 23),
+        Value = DateTime.Today.AddDays(-7),
+    };
+    private readonly Label lblHistoryTo = new() { Text = "To", AutoSize = true, Location = new Point(186, 16) };
+    private readonly DateTimePicker dtHistoryTo = new()
+    {
+        Format = DateTimePickerFormat.Short,
+        Location = new Point(210, 12),
+        Size = new Size(120, 23),
+        Value = DateTime.Today,
+    };
+    private readonly Button btHistorySearch = new() { Text = "Search", Location = new Point(346, 11), Size = new Size(90, 25) };
+    private readonly Label lblHistoryCount = new() { AutoSize = true, Location = new Point(452, 16) };
+    private readonly BindingList<DraxEventRow> _historyRows = new();
+
+    private readonly DataGridViewTextBoxColumn hColDate = new();
+    private readonly DataGridViewTextBoxColumn hColTime = new();
+    private readonly DataGridViewTextBoxColumn hColType = new();
+    private readonly DataGridViewTextBoxColumn hColAmxRef = new();
+    private readonly DataGridViewTextBoxColumn hColInputType = new();
+    private readonly DataGridViewTextBoxColumn hColText = new();
 
     // eventsGrid's own columns — built here in code rather than in
     // MainForm.Designer.cs, and instantiated up front so ConfigureEventsGridColumns()
@@ -34,17 +88,17 @@ public partial class MainForm : Form
         InitializeComponent();
 
         // Safe, side-effect-free — always runs, including at design time. Everything
-        // else (images loaded from disk, MQTT, the keyboard hook, data binding) is
-        // deliberately NOT here — it's in OnLoad below instead. Checking DesignMode
-        // in the constructor itself is unreliable (the Designer hasn't finished
-        // "siting" the control yet at this point), which is exactly the problem we
-        // hit: the old "if (IsDesignTime) return;" check in this constructor never
-        // actually evaluated true, even when genuinely running inside the Designer,
-        // so the image-loading code below used to run anyway and throw (relative
-        // paths don't resolve the same way in the Designer's own process), aborting
-        // the constructor before the grid ever got its columns. DesignMode becomes
-        // reliable once we're in OnLoad instead, because by then the Designer has
-        // finished sitting the control.
+        // else (images loaded from disk, MQTT, the database, the keyboard hook, data
+        // binding) is deliberately NOT here — it's in OnLoad below instead. Checking
+        // DesignMode in the constructor itself is unreliable (the Designer hasn't
+        // finished "siting" the control yet at this point), which is exactly the
+        // problem we hit: the old "if (IsDesignTime) return;" check in this
+        // constructor never actually evaluated true, even when genuinely running
+        // inside the Designer, so the image-loading code below used to run anyway and
+        // throw (relative paths don't resolve the same way in the Designer's own
+        // process), aborting the constructor before the grid ever got its columns.
+        // DesignMode becomes reliable once we're in OnLoad instead, because by then
+        // the Designer has finished siting the control.
         ConfigureEventsGridColumns();
         eventsGrid.AutoGenerateColumns = false;
     }
@@ -84,6 +138,8 @@ public partial class MainForm : Form
         btBack.Text = "\nBack";
         btBack.FlatAppearance.MouseOverBackColor = Color.FromArgb(210, 209, 198);
         btBack.FlatAppearance.MouseDownBackColor = Color.FromArgb(190, 189, 178);
+        btBack.Click += (_, _) => ShowEventsPage(); // only meaningful action it has right now: leave the History page
+        btEvents.Click += (_, _) => ShowEventsPage();
 
         bmp = new Bitmap(@"Icons\Forward.png");
         bmp.MakeTransparent(Color.White);
@@ -105,10 +161,13 @@ public partial class MainForm : Form
         // rendered over the grid's edge — e.g. hiding its column header row —
         // which is what editing an unrelated control and triggering a Designer
         // resave can do.
+        BuildHistoryPage();
+
         Controls.SetChildIndex(eventsGrid, 0);
-        Controls.SetChildIndex(pnlToolbar, 1);
-        Controls.SetChildIndex(pnlStatus, 2);
-        Controls.SetChildIndex(pnlFooter, 3);
+        Controls.SetChildIndex(pnlHistoryPage, 1);
+        Controls.SetChildIndex(pnlToolbar, 2);
+        Controls.SetChildIndex(pnlStatus, 3);
+        Controls.SetChildIndex(pnlFooter, 4);
 
         InstallLowLevelKeyboardHook();
 
@@ -116,6 +175,13 @@ public partial class MainForm : Form
         eventsGrid.CellFormatting += EventsGrid_CellFormatting;
 
         txtFilter.TextChanged += (_, _) => ApplyFilter();
+
+        // Open (and, on first run, create) the events database, then reload whatever
+        // was still "not accepted" from the last run — so Current Events survives an
+        // app restart instead of starting empty every time.
+        _repo = new EventsRepository { EncryptionKey = EventsDbEncryptionKey };
+        _repo.Initialize();
+        _allEvents.AddRange(_repo.GetCurrentEvents());
 
         // _mqtt has to exist before the first ApplyFilter()/UpdateStatusBar() call
         // below, since UpdateStatusBar reads _mqtt.Panels/_mqtt.IsConnected.
@@ -170,6 +236,67 @@ public partial class MainForm : Form
         eventsGrid.Columns.AddRange(colDate, colTime, colType, colAmxRef, colInputType, colText);
     }
 
+    // Builds the History page's controls and adds them to the form, hidden
+    // (pnlHistoryPage starts Visible = false) until btHistory shows it. Same column
+    // layout as eventsGrid (Models/DraxEventRow.cs), and built in code for the same
+    // reason — see ConfigureEventsGridColumns above.
+    private void BuildHistoryPage()
+    {
+        hColDate.DataPropertyName = "Date"; hColDate.HeaderText = "Date"; hColDate.Name = "hColDate"; hColDate.Width = 90;
+        hColTime.DataPropertyName = "Time"; hColTime.HeaderText = "Time"; hColTime.Name = "hColTime"; hColTime.Width = 90;
+        hColType.DataPropertyName = "Type"; hColType.HeaderText = "Type"; hColType.Name = "hColType"; hColType.Width = 120;
+        hColAmxRef.DataPropertyName = "AmxRef"; hColAmxRef.HeaderText = "AMX ref"; hColAmxRef.Name = "hColAmxRef"; hColAmxRef.Width = 110;
+        hColInputType.DataPropertyName = "InputType"; hColInputType.HeaderText = "Input Type"; hColInputType.Name = "hColInputType"; hColInputType.Width = 80;
+        hColText.DataPropertyName = "CombinedText"; hColText.HeaderText = "Text"; hColText.Name = "hColText"; hColText.Width = 320; hColText.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+        historyGrid.Columns.AddRange(hColDate, hColTime, hColType, hColAmxRef, hColInputType, hColText);
+        historyGrid.DataSource = _historyRows;
+
+        btHistorySearch.Click += (_, _) => RunHistorySearch();
+
+        pnlHistoryFilter.Controls.Add(lblHistoryFrom);
+        pnlHistoryFilter.Controls.Add(dtHistoryFrom);
+        pnlHistoryFilter.Controls.Add(lblHistoryTo);
+        pnlHistoryFilter.Controls.Add(dtHistoryTo);
+        pnlHistoryFilter.Controls.Add(btHistorySearch);
+        pnlHistoryFilter.Controls.Add(lblHistoryCount);
+
+        pnlHistoryPage.Controls.Add(historyGrid);
+        pnlHistoryPage.Controls.Add(pnlHistoryFilter);
+        Controls.Add(pnlHistoryPage);
+    }
+
+    private void ShowHistoryPage()
+    {
+        eventsGrid.Visible = false;
+        pnlHistoryPage.Visible = true;
+        pnlHistoryPage.BringToFront();
+        RunHistorySearch();
+    }
+
+    private void ShowEventsPage()
+    {
+        pnlHistoryPage.Visible = false;
+        eventsGrid.Visible = true;
+        eventsGrid.BringToFront();
+    }
+
+    private void RunHistorySearch()
+    {
+        // dtHistoryFrom/dtHistoryTo are date-only pickers, so push "To" to the very
+        // end of that day — otherwise picking today as "To" would exclude everything
+        // accepted today.
+        var from = dtHistoryFrom.Value.Date;
+        var to = dtHistoryTo.Value.Date.AddDays(1).AddTicks(-1);
+
+        _historyRows.RaiseListChangedEvents = false;
+        _historyRows.Clear();
+        foreach (var row in _repo.GetHistory(from, to)) _historyRows.Add(row);
+        _historyRows.RaiseListChangedEvents = true;
+        _historyRows.ResetBindings();
+
+        lblHistoryCount.Text = _historyRows.Count == 1 ? "1 event" : $"{_historyRows.Count} events";
+    }
+
     // --- MQTT callbacks: these fire on a background thread (MQTTnet's own),
     //     so every one of them has to marshal back onto the UI thread before
     //     touching a control — that's what the InvokeRequired check is for. ---
@@ -203,6 +330,10 @@ public partial class MainForm : Form
             // pile up repeats in the list.
             if (!IsDuplicateActiveRow(row))
             {
+                // Recorded as "not accepted" the moment it arrives, so it's on Current
+                // Events (and survives a restart) regardless of whether an operator
+                // ever actually looks at it.
+                _repo.Insert(row); // stamps row.Id with the new database row's id
                 _allEvents.Insert(0, row); // newest first, same as DraxView's EventStore
                 const int maxRetained = 1000; // matches DraxView's EventOptions.MaxRetained default
                 while (_allEvents.Count > maxRetained) _allEvents.RemoveAt(_allEvents.Count - 1);
@@ -213,6 +344,10 @@ public partial class MainForm : Form
             // An "off" (cleared) event doesn't get its own row — it removes whichever
             // "on" row raised this same point, the way a panel's current event list
             // drops the entry once it clears rather than adding a second "cleared" line.
+            // The point clearing itself is what moves it to History here (per the
+            // "auto-moves to History" behaviour) — no operator click required — so the
+            // matching database row is marked Accepted at the same time.
+            _repo.AcceptMatching(row);
             RemoveMatchingOnRow(row);
         }
 
@@ -315,6 +450,7 @@ public partial class MainForm : Form
         base.OnFormClosed(e);
         UninstallLowLevelKeyboardHook();
         if (_mqtt != null) await _mqtt.DisposeAsync();
+        _repo?.Dispose();
     }
 
     private void helpToolStripMenuItem_Click(object sender, EventArgs e)
@@ -362,21 +498,30 @@ public partial class MainForm : Form
 
     private void acceptToolStripMenuItem_Click(object sender, EventArgs e)
     {
+        if (eventsGrid.CurrentRow?.DataBoundItem is not DraxEventRow row) return;
 
+        // Manual "Accept the Alarm": mark it accepted in the database (so it's on
+        // History from now on) and drop it off Current Events immediately.
+        _repo.Accept(row.Id);
+        _allEvents.Remove(row);
+        ApplyFilter();
     }
 
     private void clearTheAlarmToolStripMenuItem_Click(object sender, EventArgs e)
     {
         if (eventsGrid.CurrentRow?.DataBoundItem is not DraxEventRow row) return;
 
+        // POC-level "Clear the Alarm" — no real MQTT command is sent to the panel.
+        // It also marks the row accepted in the database (same as the manual Accept
+        // action above) rather than just removing it from the in-memory list, so it
+        // doesn't come back as a dangling Current Event the next time the app starts,
+        // and still turns up on History the same way an accepted alarm would.
+        _repo.Accept(row.Id);
         _allEvents.Remove(row);
         ApplyFilter();
     }
 
-    private void btHistory_Click(object sender, EventArgs e)
-    {
-        System.Windows.Forms.MessageBox.Show("History button clicked. This would open the history view.", "History");
-    }
+    private void btHistory_Click(object sender, EventArgs e) => ShowHistoryPage();
 
     private void aboutToolStripMenuItem_Click(object sender, EventArgs e)
     {
