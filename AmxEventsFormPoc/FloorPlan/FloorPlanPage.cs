@@ -11,7 +11,7 @@ using SkiaSharp;
 
 namespace AmxEventsFormPoc.FloorPlan;
 
-// The floor plan page: device list (from the panel's SKF file) on the left, the
+// The floor plan page: device list (from the panel's SKF or NCF file) on the left, the
 // plan in the middle, and a slide-out on the right with the selected device's
 // details and recent events. Lives inside MainForm like the History page, and can
 // be undocked into its own window (UndockRequested) for a second screen.
@@ -23,11 +23,11 @@ public sealed class FloorPlanPage : UserControl
     private static readonly SKColor Ink = new(70, 70, 70);
 
     private readonly FloorPlanRepository _repo;
-    private SkfConfig? _skf;
-    private Dictionary<string, SkfDevice> _devices = new();
-    private Dictionary<(int, int, int), SkfDevice> _byAmxPoint = new();
+    private PanelConfig? _config;
+    private Dictionary<string, PanelDevice> _devices = new();
+    private Dictionary<(int, int, int), PanelDevice> _byAmxPoint = new();
     private Dictionary<string, PlacedDevice> _placed = new();
-    private Dictionary<int, AmxSymbol> _symbolMap = new();
+    private Dictionary<string, AmxSymbol> _symbolMap = new();
     private readonly Dictionary<string, DeviceState> _states = new();
     private readonly Dictionary<string, List<DraxEventRow>> _recent = new();
     private List<PlanFloor> _floors = new();
@@ -35,7 +35,7 @@ public sealed class FloorPlanPage : UserControl
     private DwgPlan? _plan;
     private readonly Dictionary<string, DwgPlan> _planCache = new(StringComparer.OrdinalIgnoreCase);
     private int _nodeOffset;
-    private List<SkfDevice> _listRows = new();
+    private List<PanelDevice> _listRows = new();
     private string? _slideKey;
 
     // --- controls ---
@@ -105,7 +105,8 @@ public sealed class FloorPlanPage : UserControl
         _split.SizeChanged += (_, _) => SetSplit();
     }
 
-    // Loads the saved floors, symbol map and the last SKF. Call once the page is on a form.
+    // Loads the saved floors, symbol map and the last panel configuration. Call once
+    // the page is on a form.
     public async Task InitialiseAsync()
     {
         _nodeOffset = int.TryParse(_repo.GetSetting("NodeOffset"), out var o) ? o : 0;
@@ -113,8 +114,9 @@ public sealed class FloorPlanPage : UserControl
         _placed = _repo.GetPlacedDevices().ToDictionary(p => p.Key);
         RefreshFloorBox();
 
-        var skfPath = _repo.GetSetting("SkfPath");
-        if (!string.IsNullOrEmpty(skfPath) && File.Exists(skfPath)) await LoadSkfAsync(skfPath);
+        // "SkfPath" is the first cut's name for the setting.
+        var configPath = _repo.GetSetting("ConfigPath") ?? _repo.GetSetting("SkfPath");
+        if (!string.IsNullOrEmpty(configPath) && File.Exists(configPath)) await LoadConfigAsync(configPath);
         else UpdateListInfo();
 
         long.TryParse(_repo.GetSetting("FloorId"), out var floorId);
@@ -211,7 +213,7 @@ public sealed class FloorPlanPage : UserControl
     {
         var plan = new ToolStripDropDownButton("Plan");
         plan.DropDownItems.Add("Open drawing (DWG)...", null, async (_, _) => await OpenDrawingAsync());
-        plan.DropDownItems.Add("Import panel configuration (SKF)...", null, async (_, _) => await ImportSkfAsync());
+        plan.DropDownItems.Add("Import panel configuration (SKF or NCF)...", null, async (_, _) => await ImportConfigAsync());
         plan.DropDownItems.Add(new ToolStripSeparator());
         plan.DropDownItems.Add("New floor from an area of this drawing", null, (_, _) => StartAreaFloor());
         plan.DropDownItems.Add("Rename floor...", null, (_, _) => RenameFloor());
@@ -393,7 +395,7 @@ public sealed class FloorPlanPage : UserControl
     private void SetNodeOffset()
     {
         var text = Microsoft.VisualBasic.Interaction.InputBox(
-            "The panel's AMX node offset (giAmx1Offset in AdvMan.ini). A device on SKF panel N reports to AMX as node N + offset.",
+            "The panel's AMX node offset (giAmx1Offset in AdvMan.ini). A device on configuration panel N reports to AMX as node N + offset.",
             "AMX node offset", _nodeOffset.ToString());
         if (!int.TryParse(text, out var o)) return;
         _nodeOffset = o;
@@ -442,7 +444,7 @@ public sealed class FloorPlanPage : UserControl
         _split.Panel1.Controls.Add(_listInfo);
     }
 
-    private ListViewItem ListItem(SkfDevice d)
+    private ListViewItem ListItem(PanelDevice d)
     {
         var item = new ListViewItem(new[] { d.RefText, d.Location, d.Zone > 0 ? $"{d.Zone} {d.ZoneText}" : "" });
         if (_placed.ContainsKey(d.Key)) item.ForeColor = Color.Gray; // already on a plan
@@ -467,7 +469,7 @@ public sealed class FloorPlanPage : UserControl
     private void FilterList()
     {
         var q = _search.Text.Trim();
-        IEnumerable<SkfDevice> rows = _devices.Values;
+        IEnumerable<PanelDevice> rows = _devices.Values;
         if (_unplacedOnly.Checked) rows = rows.Where(d => !_placed.ContainsKey(d.Key));
         if (q.Length > 0)
             rows = rows.Where(d =>
@@ -483,26 +485,27 @@ public sealed class FloorPlanPage : UserControl
 
     private void UpdateListInfo()
     {
-        _listInfo.Text = _skf == null
-            ? "No panel configuration loaded: Plan > Import panel configuration (SKF)."
-            : $"{_skf.SiteName}  ·  {_devices.Count:N0} devices on {_skf.PanelCount} panels, {_placed.Count:N0} placed  ·  showing {_listRows.Count:N0}";
+        _listInfo.Text = _config == null
+            ? "No panel configuration loaded: Plan > Import panel configuration (SKF or NCF)."
+            : $"{_config.SiteName} ({_config.Format})  ·  {_devices.Count:N0} devices on {_config.PanelCount} panels, {_placed.Count:N0} placed  ·  showing {_listRows.Count:N0}";
     }
 
-    private async Task ImportSkfAsync()
+    private async Task ImportConfigAsync()
     {
-        using var dlg = new OpenFileDialog { Filter = "Advanced panel configuration (*.skf)|*.skf", Title = "Import panel configuration" };
+        using var dlg = new OpenFileDialog { Filter = PanelConfig.FileFilter, Title = "Import panel configuration" };
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
-        await LoadSkfAsync(dlg.FileName);
-        if (_skf != null) _repo.SetSetting("SkfPath", dlg.FileName);
+        _config = null;
+        await LoadConfigAsync(dlg.FileName);
+        if (_config != null) _repo.SetSetting("ConfigPath", dlg.FileName);
     }
 
-    private async Task LoadSkfAsync(string path)
+    private async Task LoadConfigAsync(string path)
     {
         SetStatus("Reading " + Path.GetFileName(path) + "...");
         try
         {
-            _skf = await Task.Run(() => SkfConfig.Load(path));
-            _devices = _skf.Devices.ToDictionary(d => d.Key);
+            _config = await Task.Run(() => PanelConfig.Load(path));
+            _devices = _config.Devices.ToDictionary(d => d.Key);
             RebuildAmxIndex();
             FilterList();
             RefreshCanvasItems();
@@ -541,8 +544,8 @@ public sealed class FloorPlanPage : UserControl
         _placed[key] = moved;
     }
 
-    private AmxSymbol SymbolFor(SkfDevice d) =>
-        _symbolMap.TryGetValue(d.DeviceId, out var s) ? s : AmxSymbols.Default(d);
+    private AmxSymbol SymbolFor(PanelDevice d) =>
+        _symbolMap.TryGetValue(d.SymbolCode, out var s) ? s : AmxSymbols.Default(d);
 
     private void RefreshCanvasItems()
     {
@@ -550,7 +553,7 @@ public sealed class FloorPlanPage : UserControl
         var items = new List<PlotItem>();
         foreach (var p in _placed.Values.Where(p => p.FloorId == _floor.Id))
         {
-            if (!_devices.TryGetValue(p.Key, out var d)) continue; // not in the loaded SKF
+            if (!_devices.TryGetValue(p.Key, out var d)) continue; // not in the loaded configuration
             items.Add(new PlotItem
             {
                 Key = p.Key,
@@ -574,8 +577,8 @@ public sealed class FloorPlanPage : UserControl
             if (_slideKey == null || !_devices.TryGetValue(_slideKey, out var d) || _sSymbol.SelectedItem is not SymbolChoice c) return;
             // One choice sets the symbol for every device with this panel device code,
             // so the site's symbols are mapped in a handful of clicks.
-            _symbolMap[d.DeviceId] = c.Symbol;
-            _repo.SetSymbol(d.DeviceId, c.Symbol);
+            _symbolMap[d.SymbolCode] = c.Symbol;
+            _repo.SetSymbol(d.SymbolCode, c.Symbol);
             RefreshCanvasItems();
             ShowSlideOut(_slideKey, animate: false);
         };
@@ -635,14 +638,14 @@ public sealed class FloorPlanPage : UserControl
             $"Zone        {d.Zone}  {d.ZoneText}\n" +
             $"Type        {(d.IsInput ? "input" : "")}{(d.IsInput && d.IsOutput ? " + " : "")}{(d.IsOutput ? "output" : "")}" +
             $"{(d.Channels > 1 ? $", {d.Channels} channels" : "")}\n" +
-            $"Device code {d.DeviceId}\n" +
+            $"Device code {d.CodeText}\n" +
             (_placed.TryGetValue(key, out var p) ? $"Plan        {_floors.FirstOrDefault(f => f.Id == p.FloorId)?.Name}" : "Plan        not placed yet");
         _sDetails.Font = new Font("Consolas", 9f);
 
         var symbol = SymbolFor(d);
         _sSymbol.SelectedItem = _sSymbol.Items.Cast<SymbolChoice>().First(c => c.Symbol == symbol);
-        int sameCode = _devices.Values.Count(x => x.DeviceId == d.DeviceId);
-        _sSymbolNote.Text = $"Applies to all {sameCode:N0} devices with device code {d.DeviceId}.";
+        int sameCode = _devices.Values.Count(x => x.SymbolCode == d.SymbolCode);
+        _sSymbolNote.Text = $"Applies to all {sameCode:N0} devices with {d.Format} device code {d.DeviceId}.";
         _sRemove.Visible = _placed.ContainsKey(key);
 
         _sEvents.Items.Clear();

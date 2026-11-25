@@ -10,9 +10,10 @@ namespace AmxEventsFormPoc.FloorPlan;
 // One AMX point on an Advanced panel: the panel's network address, loop and loop
 // address. Advanced sub-addresses (multi-channel modules) share the one AMX point —
 // PanelAdvanced in the service sends node + loop + device address and drops the
-// sub-address — so the SKF's points are grouped on these three numbers.
-public sealed class SkfDevice
+// sub-address — so a configuration's points are grouped on these three numbers.
+public sealed class PanelDevice
 {
+    public string Format { get; init; } = "";   // "SKF" or "NCF": device codes differ between them
     public int Node { get; init; }
     public int Loop { get; init; }
     public int Address { get; init; }
@@ -24,35 +25,53 @@ public sealed class SkfDevice
     public bool IsOutput { get; init; }
     public int DeviceId { get; init; }
     public int Channels { get; init; }
-    // From the SKF's Purpose field on each channel: 5 = sounder output, 7 = relay /
+    // SKF only, from each channel's Purpose field: 5 = sounder output, 7 = relay /
     // door / access output (inferred from the Lambeth sample's location texts).
     public bool HasSounderOutput { get; init; }
     public bool HasRelayOutput { get; init; }
 
-    // Loops -100 and -90 in the SKF are the panel's own on-board circuits, not a
-    // detection loop.
-    public bool IsPanelCircuit => Loop < 0;
+    // The panel's own on-board circuits (sounder circuits, relays, routing), not a
+    // detection loop: loops -100 and -90 in an SKF, loop 0 in an NCF.
+    public bool IsPanelCircuit => Loop <= 0;
 
     public string Key => $"{Node}/{Loop}/{Address}";
     public string RefText => IsPanelCircuit ? $"N{Node} panel {Address}" : $"N{Node} L{Loop} D{Address}";
 
-    // The AMX point this device reports on, once the site's node offset is applied.
-    public bool Matches(int node, int loop, int input, int nodeOffset)
-        => node == Node + nodeOffset && loop == Loop && input == Address;
+    // The key a chosen symbol is stored under: the device code, per format.
+    public string SymbolCode => $"{Format}:{DeviceId}";
+    public string CodeText => $"{Format} {DeviceId}";
 }
 
-// An Advanced panel configuration file (.skf): a zip of FireDAC (Delphi) dataset
-// exports, one JSON file per table. Only the tables the floor plan needs are read:
-// tblPoint (every point with its address, zone and location text), tblZone (zone
-// names) and tblNode (panel names), plus the site name.
-public sealed class SkfConfig
+// An Advanced panel configuration: the newer .skf format or the older .ncf (Mike,
+// 2026-11-25). Both are read into the same device list.
+public sealed class PanelConfig
 {
-    public string SiteName { get; private init; } = "";
-    public IReadOnlyList<SkfDevice> Devices { get; private init; } = Array.Empty<SkfDevice>();
-    public int PointCount { get; private init; }
-    public int PanelCount { get; private init; }
+    public string Format { get; init; } = "";
+    public string SiteName { get; init; } = "";
+    public IReadOnlyList<PanelDevice> Devices { get; init; } = Array.Empty<PanelDevice>();
+    public int PointCount { get; init; }
+    public int PanelCount { get; init; }
 
-    public static SkfConfig Load(string path)
+    public static string FileFilter => "Advanced panel configuration (*.skf; *.ncf)|*.skf;*.ncf";
+
+    public static PanelConfig Load(string path) =>
+        Path.GetExtension(path).Equals(".ncf", StringComparison.OrdinalIgnoreCase)
+            ? NcfReader.Load(path)
+            : LoadSkf(path);
+
+    // The file name usually names the site; used when the configuration doesn't.
+    internal static string SiteFromFileName(string path) => Path.GetFileNameWithoutExtension(path).Trim();
+
+    internal static IReadOnlyList<PanelDevice> Order(IEnumerable<PanelDevice> devices) =>
+        devices.OrderBy(d => d.Node).ThenBy(d => d.IsPanelCircuit ? 1 : 0).ThenBy(d => Math.Abs(d.Loop)).ThenBy(d => d.Address).ToList();
+
+    // ------------------------------------------------------------------- SKF
+
+    // The newer format: a zip of FireDAC (Delphi) dataset exports, one JSON file per
+    // table. Only the tables the floor plan needs are read: tblPoint (every point with
+    // its address, zone and location text), tblZone (zone names) and tblNode (panel
+    // names), plus the site name.
+    private static PanelConfig LoadSkf(string path)
     {
         using var zip = ZipFile.OpenRead(path);
 
@@ -72,8 +91,9 @@ public sealed class SkfConfig
                 // channels of a module usually repeat it.
                 var first = g.OrderBy(p => Int(p, "SubAddress")).First();
                 int zone = Int(first, "ZoneNumber");
-                return new SkfDevice
+                return new PanelDevice
                 {
+                    Format = "SKF",
                     Node = g.Key.Node,
                     Loop = g.Key.Loop,
                     Address = g.Key.Address,
@@ -89,18 +109,14 @@ public sealed class SkfConfig
                     HasSounderOutput = g.Any(p => Int(p, "Purpose") == 5),
                     HasRelayOutput = g.Any(p => Int(p, "Purpose") == 7),
                 };
-            })
-            .OrderBy(d => d.Node).ThenBy(d => d.Loop < 0 ? 1 : 0).ThenBy(d => Math.Abs(d.Loop)).ThenBy(d => d.Address)
-            .ToList();
+            });
 
-        return new SkfConfig
+        var siteName = site == null ? "" : Str(site, "SiteName").Trim();
+        return new PanelConfig
         {
-            // The site name is often left blank in the panel software; the file name
-            // usually names the site.
-            SiteName = site != null && Str(site, "SiteName").Trim().Length > 0
-                ? Str(site, "SiteName").Trim()
-                : Path.GetFileNameWithoutExtension(path).Trim(),
-            Devices = devices,
+            Format = "SKF",
+            SiteName = siteName.Length > 0 ? siteName : SiteFromFileName(path),
+            Devices = Order(devices),
             PointCount = points.Count,
             PanelCount = nodeNames.Count,
         };

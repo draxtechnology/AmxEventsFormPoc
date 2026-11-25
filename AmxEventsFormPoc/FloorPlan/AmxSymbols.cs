@@ -40,11 +40,12 @@ public static class AmxSymbols
         _ => "Unassigned",
     };
 
-    // A first guess until the Advanced device-code list is known: the SKF doesn't name
-    // device types, but each channel's Purpose says sounder output or relay output.
+    // A first guess until the Advanced device-code list is known: neither format names
+    // device types. An SKF channel's Purpose says sounder output or relay output; an NCF
+    // has no such hint, so only multi-channel modules (Interface) are guessed there.
     // Plain inputs (detectors, call points, monitored inputs) can't be told apart, so
     // they start Unassigned; picking a symbol for one sets it for its device code.
-    public static AmxSymbol Default(SkfDevice d)
+    public static AmxSymbol Default(PanelDevice d)
     {
         if (d.HasSounderOutput) return AmxSymbol.SounderBase;
         if (d.HasRelayOutput || d.Channels > 1) return AmxSymbol.Interface;

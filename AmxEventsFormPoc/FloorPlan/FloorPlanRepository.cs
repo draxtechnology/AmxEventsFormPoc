@@ -76,6 +76,15 @@ public sealed class FloorPlanRepository : IDisposable
                 DeviceCode INTEGER PRIMARY KEY,
                 Symbol     TEXT NOT NULL
             );
+            -- Symbols per device code, per configuration format ("SKF:41", "NCF:48"):
+            -- the two Advanced formats number their device types differently.
+            CREATE TABLE IF NOT EXISTS PlanSymbols (
+                Code   TEXT PRIMARY KEY,
+                Symbol TEXT NOT NULL
+            );
+            -- PlanSymbolMap (the first cut, SKF only) carried over once.
+            INSERT OR IGNORE INTO PlanSymbols (Code, Symbol)
+                SELECT 'SKF:' || DeviceCode, Symbol FROM PlanSymbolMap;
             CREATE TABLE IF NOT EXISTS PlanSettings (
                 Key   TEXT PRIMARY KEY,
                 Value TEXT NOT NULL
@@ -176,22 +185,22 @@ public sealed class FloorPlanRepository : IDisposable
 
     // ----------------------------------------------------------------- symbols
 
-    public Dictionary<int, AmxSymbol> GetSymbolMap()
+    public Dictionary<string, AmxSymbol> GetSymbolMap()
     {
         using var cmd = _connection.CreateCommand();
-        cmd.CommandText = "SELECT DeviceCode, Symbol FROM PlanSymbolMap";
+        cmd.CommandText = "SELECT Code, Symbol FROM PlanSymbols";
         using var r = cmd.ExecuteReader();
-        var map = new Dictionary<int, AmxSymbol>();
+        var map = new Dictionary<string, AmxSymbol>(StringComparer.OrdinalIgnoreCase);
         while (r.Read())
-            if (Enum.TryParse<AmxSymbol>(r.GetString(1), out var s)) map[r.GetInt32(0)] = s;
+            if (Enum.TryParse<AmxSymbol>(r.GetString(1), out var s)) map[r.GetString(0)] = s;
         return map;
     }
 
-    public void SetSymbol(int deviceCode, AmxSymbol symbol)
+    public void SetSymbol(string code, AmxSymbol symbol)
     {
         using var cmd = _connection.CreateCommand();
-        cmd.CommandText = "INSERT INTO PlanSymbolMap (DeviceCode, Symbol) VALUES ($c, $s) ON CONFLICT (DeviceCode) DO UPDATE SET Symbol=$s";
-        cmd.Parameters.AddWithValue("$c", deviceCode);
+        cmd.CommandText = "INSERT INTO PlanSymbols (Code, Symbol) VALUES ($c, $s) ON CONFLICT (Code) DO UPDATE SET Symbol=$s";
+        cmd.Parameters.AddWithValue("$c", code);
         cmd.Parameters.AddWithValue("$s", symbol.ToString());
         cmd.ExecuteNonQuery();
     }
