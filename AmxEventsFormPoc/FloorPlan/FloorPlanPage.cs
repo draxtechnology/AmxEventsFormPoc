@@ -244,17 +244,53 @@ public sealed class FloorPlanPage : UserControl
         using var dlg = new OpenFileDialog { Filter = "AutoCAD drawings (*.dwg)|*.dwg", Title = "Open a floor plan drawing" };
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
+        // Already open: go to its first floor rather than adding the drawing again
+        // (Mike, 2026-11-25: importing the same DWG twice listed it twice).
+        var existing = _floors.FirstOrDefault(f => string.Equals(
+            Path.GetFullPath(f.DwgPath), Path.GetFullPath(dlg.FileName), StringComparison.OrdinalIgnoreCase));
+        if (existing != null)
+        {
+            await ShowFloorAsync(existing);
+            SetStatus("That drawing is already open: its floors are in the Floor list.");
+            return;
+        }
+
         var plan = await LoadPlanAsync(dlg.FileName);
         if (plan == null) return;
-        var floor = new PlanFloor
+        var hidden = plan.Layers.Where(l => l.InitiallyHidden).Select(l => l.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var name = Path.GetFileNameWithoutExtension(dlg.FileName);
+
+        // A sheet with several plans on it (Mike's X-Ref Basement-5th Floors has all
+        // seven side by side) becomes one floor per plan, each cropped to its plan;
+        // a single plan stays one floor showing the whole drawing.
+        var areas = await Task.Run(() => plan.FindFloorAreas());
+        var floors = new List<PlanFloor>();
+        if (areas.Count <= 1)
         {
-            Name = Path.GetFileNameWithoutExtension(dlg.FileName),
-            DwgPath = dlg.FileName,
-            HiddenLayers = plan.Layers.Where(l => l.InitiallyHidden).Select(l => l.Name).ToHashSet(StringComparer.OrdinalIgnoreCase),
-        };
-        _repo.SaveFloor(floor);
+            floors.Add(new PlanFloor { Name = name, DwgPath = dlg.FileName, HiddenLayers = hidden });
+        }
+        else
+        {
+            for (int i = 0; i < areas.Count; i++)
+            {
+                var a = areas[i];
+                floors.Add(new PlanFloor
+                {
+                    Name = $"{name} ({i + 1} of {areas.Count})",
+                    DwgPath = dlg.FileName,
+                    CropLeft = a.Left + plan.OriginX,
+                    CropBottom = a.Top + plan.OriginY,   // SKRect Top is the low Y here (plan Y is up)
+                    CropRight = a.Right + plan.OriginX,
+                    CropTop = a.Bottom + plan.OriginY,
+                    HiddenLayers = new HashSet<string>(hidden, StringComparer.OrdinalIgnoreCase),
+                });
+            }
+        }
+        foreach (var f in floors) _repo.SaveFloor(f);
         RefreshFloorBox();
-        await ShowFloorAsync(floor);
+        await ShowFloorAsync(floors[0]);
+        if (floors.Count > 1)
+            SetStatus($"Found {floors.Count} floors on this drawing: pick one in the Floor list, and rename them from the Plan menu.");
     }
 
     private async Task<DwgPlan?> LoadPlanAsync(string path)
@@ -288,10 +324,14 @@ public sealed class FloorPlanPage : UserControl
     {
         var plan = await LoadPlanAsync(floor.DwgPath);
         if (plan == null) return;
-        _floor = floor;
+        // The Floor list holds its own copies (rebuilt from the database), so select by
+        // Id: selecting the object passed in matched nothing and the box kept showing the
+        // previous floor (seen after a drawing was split into new floors).
+        var listed = _floorBox.Items.Cast<PlanFloor>().FirstOrDefault(f => f.Id == floor.Id);
+        _floor = listed ?? floor;
         _plan = plan;
         _repo.SetSetting("FloorId", floor.Id.ToString());
-        if (_floorBox.SelectedItem != floor) _floorBox.SelectedItem = floor;
+        if (listed != null && _floorBox.SelectedItem != listed) _floorBox.SelectedItem = listed;
 
         var sw = Stopwatch.StartNew();
         SKRect? crop = floor.HasCrop

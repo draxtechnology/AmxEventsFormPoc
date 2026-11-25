@@ -285,6 +285,70 @@ public sealed class DwgPlan
         return list;
     }
 
+    // Finds separate plans laid out on one sheet (a multi-floor drawing often has every
+    // floor side by side, or stacked). The drawing is split wherever there is a clear
+    // empty band across it, first left to right, then each part top to bottom.  Small
+    // islands (title blocks, stray symbols) are dropped.  Returns one area per plan in
+    // reading order (left to right, top to bottom); a single plan gives one area.
+    public List<SKRect> FindFloorAreas()
+    {
+        var xs = new List<float>();
+        var ys = new List<float>();
+        foreach (var l in _layers.Where(l => !l.InitiallyHidden)) l.SampleVertices(xs, ys, 400_000);
+        var pts = xs.Select((x, i) => new SKPoint(x, ys[i])).ToList();
+        if (pts.Count < 100) return new List<SKRect> { Extents };
+
+        var areas = new List<List<SKPoint>>();
+        foreach (var column in Split(pts, p => p.X))
+            areas.AddRange(Split(column, p => p.Y));
+
+        // Clutter, not a floor: under 2.5% of the drawing, or well under the size of the
+        // biggest plan (floors on one sheet are similar sizes; a stray cluster of door
+        // swings or symbols isn't).  A genuinely small plan can still be added by hand
+        // with "New floor from an area".
+        int biggest = areas.Max(a => a.Count);
+        int minPoints = Math.Max(Math.Max(50, pts.Count / 40), biggest * 15 / 100);
+        var result = areas
+            .Where(a => a.Count >= minPoints)
+            .Select(a =>
+            {
+                // Percentile bounds per area, so a stray line doesn't stretch the crop.
+                var ax = a.Select(p => p.X).OrderBy(v => v).ToList();
+                var ay = a.Select(p => p.Y).OrderBy(v => v).ToList();
+                float Q(List<float> v, double q) => v[(int)Math.Clamp(q * (v.Count - 1), 0, v.Count - 1)];
+                var r = new SKRect(Q(ax, 0.002), Q(ay, 0.002), Q(ax, 0.998), Q(ay, 0.998));
+                return SKRect.Inflate(r, Math.Max(r.Width, r.Height) * 0.04f, Math.Max(r.Width, r.Height) * 0.04f);
+            })
+            .OrderBy(r => r.Left).ThenByDescending(r => r.Bottom)
+            .ToList();
+        return result.Count > 0 ? result : new List<SKRect> { Extents };
+    }
+
+    // Splits points into groups separated by an empty band at least 2% of the span
+    // wide along one axis.
+    private static List<List<SKPoint>> Split(List<SKPoint> pts, Func<SKPoint, float> axis)
+    {
+        const int bins = 1000;
+        float min = pts.Min(axis), max = pts.Max(axis);
+        if (max - min <= 0) return new List<List<SKPoint>> { pts };
+        var counts = new int[bins];
+        foreach (var p in pts) counts[Math.Min(bins - 1, (int)((axis(p) - min) / (max - min) * bins))]++;
+
+        // A bin counts as empty if it holds almost nothing (a stray line crossing a gap
+        // shouldn't join two floors).
+        int noise = Math.Max(1, pts.Count / 20000);
+        var cuts = new List<float>();
+        int run = 0;
+        for (int i = 0; i < bins; i++)
+        {
+            if (counts[i] <= noise) { run++; continue; }
+            if (run >= bins / 50 && i - run > 0) cuts.Add(min + (i - run / 2f) / bins * (max - min));
+            run = 0;
+        }
+        if (cuts.Count == 0) return new List<List<SKPoint>> { pts };
+        return pts.GroupBy(p => cuts.Count(c => axis(p) > c)).OrderBy(g => g.Key).Select(g => g.ToList()).ToList();
+    }
+
     private SKRect ComputeExtents()
     {
         // Percentile extents: drawings often carry a stray object miles from the
