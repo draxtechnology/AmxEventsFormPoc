@@ -170,7 +170,7 @@ public sealed class PlanCanvas : Control
         {
             using var p = new SKPaint { Color = SKColors.Gray, IsAntialias = true };
             using var f = new SKFont { Size = 16 };
-            canvas.DrawText("Open a drawing to start: Plan > Open drawing", Width / 2f, Height / 2f, SKTextAlign.Center, f, p);
+            canvas.DrawText("Open a floor plan to start: Plan > Open floor plan", Width / 2f, Height / 2f, SKTextAlign.Center, f, p);
             return;
         }
 

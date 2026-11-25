@@ -14,6 +14,7 @@
   <ItemGroup>
     <!-- Same MQTTnet version DraxView.csproj pins, so both speak the identical dialect. -->
     <PackageReference Include="ACadSharp" Version="3.8.35" />
+    <PackageReference Include="Docnet.Core" Version="2.6.0" />
     <PackageReference Include="MQTTnet" Version="5.2.0.1603" />
 
     <!-- Events database (Services/EventsRepository.cs). Core + bundle_e_sqlcipher

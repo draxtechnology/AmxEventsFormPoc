@@ -32,8 +32,9 @@ public sealed class FloorPlanPage : UserControl
     private readonly Dictionary<string, List<DraxEventRow>> _recent = new();
     private List<PlanFloor> _floors = new();
     private PlanFloor? _floor;
-    private DwgPlan? _plan;
-    private readonly Dictionary<string, DwgPlan> _planCache = new(StringComparer.OrdinalIgnoreCase);
+    private IPlanSource? _plan;
+    // Keyed on file and page: a PDF's pages are separate plans.
+    private readonly Dictionary<string, IPlanSource> _planCache = new(StringComparer.OrdinalIgnoreCase);
     private int _nodeOffset;
     private List<PanelDevice> _listRows = new();
     private string? _slideKey;
@@ -212,7 +213,7 @@ public sealed class FloorPlanPage : UserControl
     private void BuildToolbar()
     {
         var plan = new ToolStripDropDownButton("Plan");
-        plan.DropDownItems.Add("Open drawing (DWG)...", null, async (_, _) => await OpenDrawingAsync());
+        plan.DropDownItems.Add("Open floor plan...", null, async (_, _) => await OpenDrawingAsync());
         plan.DropDownItems.Add("Import panel configuration (SKF or NCF)...", null, async (_, _) => await ImportConfigAsync());
         plan.DropDownItems.Add(new ToolStripSeparator());
         plan.DropDownItems.Add("New floor from an area of this drawing", null, (_, _) => StartAreaFloor());
@@ -241,7 +242,11 @@ public sealed class FloorPlanPage : UserControl
 
     private async Task OpenDrawingAsync()
     {
-        using var dlg = new OpenFileDialog { Filter = "AutoCAD drawings (*.dwg)|*.dwg", Title = "Open a floor plan drawing" };
+        using var dlg = new OpenFileDialog
+        {
+            Filter = PlanFileFilter,
+            Title = "Open floor plan",
+        };
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
         // Already open: go to its first floor rather than adding the drawing again
@@ -255,7 +260,13 @@ public sealed class FloorPlanPage : UserControl
             return;
         }
 
-        var plan = await LoadPlanAsync(dlg.FileName);
+        if (IsPdf(dlg.FileName))
+        {
+            await OpenPdfAsync(dlg.FileName);
+            return;
+        }
+
+        var plan = await LoadPlanAsync(dlg.FileName, 0);
         if (plan == null) return;
         var hidden = plan.Layers.Where(l => l.InitiallyHidden).Select(l => l.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var name = Path.GetFileNameWithoutExtension(dlg.FileName);
@@ -293,9 +304,45 @@ public sealed class FloorPlanPage : UserControl
             SetStatus($"Found {floors.Count} floors on this drawing: pick one in the Floor list, and rename them from the Plan menu.");
     }
 
-    private async Task<DwgPlan?> LoadPlanAsync(string path)
+    // Every file type a floor plan can be opened from, in one filter, so the dialog
+    // offers them all at once; add an extension here when a reader is added.
+    private static readonly string[] PlanExtensions = { "dwg", "pdf" };
+    private static string PlanFileFilter =>
+        $"Floor plans ({string.Join("; ", PlanExtensions.Select(e => "*." + e))})|{string.Join(";", PlanExtensions.Select(e => "*." + e))}";
+
+    private static bool IsPdf(string path) => Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase);
+
+    // A PDF becomes one floor per page, named by page when there's more than one.
+    private async Task OpenPdfAsync(string path)
     {
-        if (_planCache.TryGetValue(path, out var cached)) return cached;
+        int pages;
+        try
+        {
+            pages = await Task.Run(() => PdfPlan.CountPages(path));
+        }
+        catch (Exception ex)
+        {
+            SetStatus("Could not read the PDF: " + ex.Message);
+            return;
+        }
+        var name = Path.GetFileNameWithoutExtension(path);
+        var floors = Enumerable.Range(0, pages).Select(i => new PlanFloor
+        {
+            Name = pages == 1 ? name : $"{name} (page {i + 1} of {pages})",
+            DwgPath = path,
+            Page = i,
+        }).ToList();
+        foreach (var f in floors) _repo.SaveFloor(f);
+        RefreshFloorBox();
+        await ShowFloorAsync(floors[0]);
+        if (pages > 1)
+            SetStatus($"{pages} pages, one floor each: pick one in the Floor list, and rename them from the Plan menu.");
+    }
+
+    private async Task<IPlanSource?> LoadPlanAsync(string path, int page)
+    {
+        var key = path + "|" + page;
+        if (_planCache.TryGetValue(key, out var cached)) return cached;
         if (!File.Exists(path))
         {
             SetStatus("Drawing not found: " + path);
@@ -305,8 +352,10 @@ public sealed class FloorPlanPage : UserControl
         UseWaitCursor = true;
         try
         {
-            var plan = await Task.Run(() => DwgPlan.Load(path));
-            _planCache[path] = plan;
+            IPlanSource plan = IsPdf(path)
+                ? await Task.Run(() => PdfPlan.Load(path, page))
+                : await Task.Run(() => DwgPlan.Load(path));
+            _planCache[key] = plan;
             return plan;
         }
         catch (Exception ex)
@@ -322,7 +371,7 @@ public sealed class FloorPlanPage : UserControl
 
     private async Task ShowFloorAsync(PlanFloor floor)
     {
-        var plan = await LoadPlanAsync(floor.DwgPath);
+        var plan = await LoadPlanAsync(floor.DwgPath, floor.Page);
         if (plan == null) return;
         // The Floor list holds its own copies (rebuilt from the database), so select by
         // Id: selecting the object passed in matched nothing and the box kept showing the
@@ -342,8 +391,7 @@ public sealed class FloorPlanPage : UserControl
         var recordMs = sw.ElapsedMilliseconds;
         _canvas.SetPlan(picture, crop ?? plan.Extents);
         RefreshCanvasItems();
-        _canvas.StatusText = $"{Path.GetFileName(floor.DwgPath)}  ·  read {plan.ReadTime.TotalSeconds:F1} s, prepared {plan.FlattenTime.TotalSeconds:F1} s, " +
-                             $"{plan.SegmentCount / 1000:N0}k line segments, floor built in {recordMs} ms";
+        _canvas.StatusText = $"{Path.GetFileName(floor.DwgPath)}  ·  {plan.Description}, floor built in {recordMs} ms";
         SetStatus("");
         _canvas.Invalidate();
         _list.Invalidate();
@@ -351,7 +399,7 @@ public sealed class FloorPlanPage : UserControl
 
     private void StartAreaFloor()
     {
-        if (_plan == null || _floor == null) { SetStatus("Open a drawing first."); return; }
+        if (_plan == null || _floor == null) { SetStatus("Open a floor plan first."); return; }
         SetStatus("Drag a box round the floor you want...");
         _canvas.DefineArea();
     }
@@ -365,6 +413,7 @@ public sealed class FloorPlanPage : UserControl
         {
             Name = name.Trim(),
             DwgPath = _floor.DwgPath,
+            Page = _floor.Page,
             CropLeft = area.Left + _plan.OriginX,
             CropBottom = area.Top + _plan.OriginY,     // SKRect Top is the low Y here (plan Y is up)
             CropRight = area.Right + _plan.OriginX,
@@ -405,6 +454,11 @@ public sealed class FloorPlanPage : UserControl
     private async void ChooseLayers()
     {
         if (_plan == null || _floor == null) return;
+        if (_plan.Layers.Count == 0)
+        {
+            MessageBox.Show(this, "A PDF has no layers to switch on or off.", "Layers", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
         using var form = new Form
         {
             Text = "Layers shown on " + _floor.Name, Width = 420, Height = 560, StartPosition = FormStartPosition.CenterParent,

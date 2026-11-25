@@ -18,7 +18,7 @@ namespace AmxEventsFormPoc.FloorPlan;
 // Coordinates are drawing units with Y up, stored relative to Origin: site drawings
 // are often placed at large real-world coordinates, and floats lose precision out
 // there, so everything is shifted near zero first.
-public sealed class DwgPlan
+public sealed class DwgPlan : IPlanSource
 {
     public string Path { get; }
     public SKRect Extents { get; private set; }      // where most of the drawing is (stray far-off objects ignored)
@@ -27,6 +27,8 @@ public sealed class DwgPlan
     public TimeSpan FlattenTime { get; private set; }
     public int EntityCount { get; private set; }
     public long SegmentCount => _layers.Sum(l => (long)l.SegmentCount);
+    public string Description =>
+        $"read {ReadTime.TotalSeconds:F1} s, prepared {FlattenTime.TotalSeconds:F1} s, {SegmentCount / 1000:N0}k line segments";
 
     // Plan coordinates are stored relative to this point; add it back to get true
     // drawing coordinates (what gets saved, so positions survive a reload).
