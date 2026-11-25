@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Drawing;
 using System.Linq;
 using System.Windows.Forms;
+using AmxEventsFormPoc.FloorPlan;
 using AmxEventsFormPoc.Models;
 using AmxEventsFormPoc.Services;
 using Microsoft.VisualBasic;
@@ -62,6 +63,14 @@ public partial class MainForm : Form
     private readonly Button btHistorySearch = new() { Text = "Search", Location = new Point(346, 11), Size = new Size(90, 25) };
     private readonly Label lblHistoryCount = new() { AutoSize = true, Location = new Point(452, 16) };
     private readonly BindingList<DraxEventRow> _historyRows = new();
+
+    // --- Floor plan page: a third page alongside Events and History (FloorPlan/).
+    //     Undock moves it into its own window for a second screen; closing that
+    //     window docks it back. ---
+    private FloorPlanRepository _planRepo = null!;
+    private FloorPlanPage _planPage = null!;
+    private Form? _planWindow;
+    private readonly Button btPlan = new();
 
     private readonly DataGridViewTextBoxColumn hColDate = new();
     private readonly DataGridViewTextBoxColumn hColTime = new();
@@ -162,12 +171,14 @@ public partial class MainForm : Form
         // which is what editing an unrelated control and triggering a Designer
         // resave can do.
         BuildHistoryPage();
+        BuildPlanPage();
 
         Controls.SetChildIndex(eventsGrid, 0);
-        Controls.SetChildIndex(pnlHistoryPage, 1);
-        Controls.SetChildIndex(pnlToolbar, 2);
-        Controls.SetChildIndex(pnlStatus, 3);
-        Controls.SetChildIndex(pnlFooter, 4);
+        Controls.SetChildIndex(_planPage, 1);
+        Controls.SetChildIndex(pnlHistoryPage, 2);
+        Controls.SetChildIndex(pnlToolbar, 3);
+        Controls.SetChildIndex(pnlStatus, 4);
+        Controls.SetChildIndex(pnlFooter, 5);
 
         InstallLowLevelKeyboardHook();
 
@@ -179,8 +190,7 @@ public partial class MainForm : Form
         // Open (and, on first run, create) the events database, then reload whatever
         // was still "not accepted" from the last run — so Current Events survives an
         // app restart instead of starting empty every time.
-        _repo = new EventsRepository { EncryptionKey = EventsDbEncryptionKey };
-        _repo.Initialize();
+        // _repo is opened in BuildPlanPage above (the floor plan tables share its file).
         _allEvents.AddRange(_repo.GetCurrentEvents());
 
         // _mqtt has to exist before the first ApplyFilter()/UpdateStatusBar() call
@@ -265,8 +275,93 @@ public partial class MainForm : Form
         Controls.Add(pnlHistoryPage);
     }
 
+    // Builds the Plan button (after History in the top bar) and the floor plan page.
+    // The page's tables live in the same events.db, so the events repository is
+    // opened here, first (its Initialize does SQLCipher's one-time setup).
+    private void BuildPlanPage()
+    {
+        btPlan.Image = new Bitmap(@"Icons\Plan.png");
+        btPlan.Font = btHistory.Font;
+        btPlan.Size = btHistory.Size;
+        btPlan.Margin = btHistory.Margin;
+        btPlan.TextAlign = ContentAlignment.BottomCenter;
+        btPlan.TextImageRelation = TextImageRelation.ImageAboveText;
+        btPlan.FlatStyle = FlatStyle.Flat;
+        btPlan.FlatAppearance.BorderSize = 0;
+        btPlan.BackColor = Color.Transparent;
+        btPlan.Text = "\nPlan";
+        btPlan.FlatAppearance.MouseOverBackColor = Color.FromArgb(210, 209, 198);
+        btPlan.FlatAppearance.MouseDownBackColor = Color.FromArgb(190, 189, 178);
+        btPlan.Click += (_, _) => ShowPlanPage();
+        pnlStatus.Controls.Add(btPlan);
+        pnlStatus.Controls.SetChildIndex(btPlan, pnlStatus.Controls.GetChildIndex(btHistory) + 1);
+
+        _repo = new EventsRepository { EncryptionKey = EventsDbEncryptionKey };
+        _repo.Initialize();
+        _planRepo = new FloorPlanRepository(EventsDbEncryptionKey);
+        _planPage = new FloorPlanPage(_planRepo) { Visible = false };
+        _planPage.UndockRequested += TogglePlanWindow;
+        _planPage.AlarmShown += () => { if (_planWindow == null) ShowPlanPage(); else _planWindow.Activate(); };
+        Controls.Add(_planPage);
+        Shown += async (_, _) =>
+        {
+            await _planPage.InitialiseAsync();
+            _planPage.LoadActiveEvents(_allEvents);
+        };
+    }
+
+    private void ShowPlanPage()
+    {
+        if (_planWindow != null) { _planWindow.Activate(); return; }
+        eventsGrid.Visible = false;
+        pnlHistoryPage.Visible = false;
+        _planPage.Visible = true;
+        _planPage.BringToFront();
+    }
+
+    // Moves the plan page between this window and a window of its own.
+    private void TogglePlanWindow()
+    {
+        if (_planWindow != null)
+        {
+            _planWindow.Close(); // FormClosed docks it back
+            return;
+        }
+
+        bool wasShowing = _planPage.Visible;
+        Controls.Remove(_planPage);
+        _planWindow = new Form
+        {
+            Text = "Floor plan",
+            Icon = Icon,
+            TopMost = true,
+            StartPosition = FormStartPosition.Manual,
+            Size = new Size(1400, 900),
+        };
+        // Open it on another screen when there is one.
+        var here = Screen.FromControl(this);
+        var other = Screen.AllScreens.FirstOrDefault(sc => !sc.Equals(here));
+        _planWindow.Location = (other ?? here).WorkingArea.Location + new Size(40, 40);
+        _planPage.Visible = true;
+        _planPage.IsUndocked = true;
+        _planWindow.Controls.Add(_planPage);
+        _planWindow.FormClosed += (_, _) =>
+        {
+            _planWindow!.Controls.Remove(_planPage);
+            _planWindow = null;
+            _planPage.IsUndocked = false;
+            _planPage.Visible = false;
+            Controls.Add(_planPage);
+            Controls.SetChildIndex(_planPage, 1);
+            ShowPlanPage();
+        };
+        _planWindow.Show();
+        if (wasShowing) ShowEventsPage();
+    }
+
     private void ShowHistoryPage()
     {
+        if (_planWindow == null) _planPage.Visible = false;
         eventsGrid.Visible = false;
         pnlHistoryPage.Visible = true;
         pnlHistoryPage.BringToFront();
@@ -275,6 +370,7 @@ public partial class MainForm : Form
 
     private void ShowEventsPage()
     {
+        if (_planWindow == null) _planPage.Visible = false;
         pnlHistoryPage.Visible = false;
         eventsGrid.Visible = true;
         eventsGrid.BringToFront();
@@ -352,6 +448,7 @@ public partial class MainForm : Form
         }
 
         ApplyFilter();
+        _planPage.OnEvent(row);
     }
 
     // Same point/event identity as AmxRef plus Type: Panel + Node + Loop + Input
@@ -450,6 +547,7 @@ public partial class MainForm : Form
         base.OnFormClosed(e);
         UninstallLowLevelKeyboardHook();
         if (_mqtt != null) await _mqtt.DisposeAsync();
+        _planRepo?.Dispose();
         _repo?.Dispose();
     }
 

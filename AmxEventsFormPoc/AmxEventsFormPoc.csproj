@@ -13,6 +13,7 @@
 
   <ItemGroup>
     <!-- Same MQTTnet version DraxView.csproj pins, so both speak the identical dialect. -->
+    <PackageReference Include="ACadSharp" Version="3.8.35" />
     <PackageReference Include="MQTTnet" Version="5.2.0.1603" />
 
     <!-- Events database (Services/EventsRepository.cs). Core + bundle_e_sqlcipher
@@ -22,6 +23,7 @@
          setting that key, with no package/provider change and no file-format migration
          needed when that requirement lands. -->
     <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="10.0.2" />
+    <PackageReference Include="SkiaSharp" Version="4.157.0" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlcipher" Version="2.1.11" />
   </ItemGroup>
 
@@ -53,6 +55,9 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Update="Icons\History.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="Icons\Plan.png">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>
