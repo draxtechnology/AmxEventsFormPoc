@@ -14,6 +14,10 @@ public sealed class PlanFloor
     public string Name { get; set; } = "";
     public string DwgPath { get; set; } = "";   // the drawing file: a .dwg or a .pdf
     public int Page { get; set; }                // 0-based page, for a PDF
+    // SHA-256 of the drawing file, so the same file is recognised again even when it
+    // is saved somewhere else or renamed (resubmitted PDFs often are).  Empty for
+    // floors set up before this was kept; worked out when first needed.
+    public string FileHash { get; set; } = "";
     // Crop in true drawing coordinates (not screen pixels), or null for the whole drawing.
     public double? CropLeft { get; set; }
     public double? CropBottom { get; set; }
@@ -92,6 +96,7 @@ public sealed class FloorPlanRepository : IDisposable
             );
             """);
         AddColumnIfMissing("PlanFloors", "Page", "INTEGER NOT NULL DEFAULT 0");
+        AddColumnIfMissing("PlanFloors", "FileHash", "TEXT NOT NULL DEFAULT ''");
     }
 
     // PlanFloors gained Page for PDF floors; add it to a database made before that.
@@ -107,7 +112,7 @@ public sealed class FloorPlanRepository : IDisposable
     public List<PlanFloor> GetFloors()
     {
         using var cmd = _connection.CreateCommand();
-        cmd.CommandText = "SELECT Id, Name, DwgPath, CropLeft, CropBottom, CropRight, CropTop, HiddenLayers, Page FROM PlanFloors ORDER BY Id";
+        cmd.CommandText = "SELECT Id, Name, DwgPath, CropLeft, CropBottom, CropRight, CropTop, HiddenLayers, Page, FileHash FROM PlanFloors ORDER BY Id";
         using var r = cmd.ExecuteReader();
         var list = new List<PlanFloor>();
         while (r.Read())
@@ -124,6 +129,7 @@ public sealed class FloorPlanRepository : IDisposable
                 HiddenLayers = new HashSet<string>(
                     r.GetString(7).Split('\n', StringSplitOptions.RemoveEmptyEntries), StringComparer.OrdinalIgnoreCase),
                 Page = r.GetInt32(8),
+                FileHash = r.GetString(9),
             });
         }
         return list;
@@ -133,8 +139,8 @@ public sealed class FloorPlanRepository : IDisposable
     {
         using var cmd = _connection.CreateCommand();
         cmd.CommandText = f.Id == 0
-            ? "INSERT INTO PlanFloors (Name, DwgPath, CropLeft, CropBottom, CropRight, CropTop, HiddenLayers, Page) VALUES ($n, $p, $l, $b, $r, $t, $h, $pg); SELECT last_insert_rowid();"
-            : "UPDATE PlanFloors SET Name=$n, DwgPath=$p, CropLeft=$l, CropBottom=$b, CropRight=$r, CropTop=$t, HiddenLayers=$h, Page=$pg WHERE Id=$id; SELECT $id;";
+            ? "INSERT INTO PlanFloors (Name, DwgPath, CropLeft, CropBottom, CropRight, CropTop, HiddenLayers, Page, FileHash) VALUES ($n, $p, $l, $b, $r, $t, $h, $pg, $fh); SELECT last_insert_rowid();"
+            : "UPDATE PlanFloors SET Name=$n, DwgPath=$p, CropLeft=$l, CropBottom=$b, CropRight=$r, CropTop=$t, HiddenLayers=$h, Page=$pg, FileHash=$fh WHERE Id=$id; SELECT $id;";
         cmd.Parameters.AddWithValue("$id", f.Id);
         cmd.Parameters.AddWithValue("$n", f.Name);
         cmd.Parameters.AddWithValue("$p", f.DwgPath);
@@ -144,6 +150,7 @@ public sealed class FloorPlanRepository : IDisposable
         cmd.Parameters.AddWithValue("$t", (object?)f.CropTop ?? DBNull.Value);
         cmd.Parameters.AddWithValue("$h", string.Join("\n", f.HiddenLayers));
         cmd.Parameters.AddWithValue("$pg", f.Page);
+        cmd.Parameters.AddWithValue("$fh", f.FileHash ?? "");
         f.Id = Convert.ToInt64(cmd.ExecuteScalar());
     }
 

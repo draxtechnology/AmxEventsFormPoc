@@ -118,4 +118,30 @@ public sealed class PdfPlan : IPlanSource
     // Plans on one PDF page aren't split automatically; "New floor from an area"
     // cuts one out by hand.
     public List<SKRect> FindFloorAreas() => new() { Extents };
+
+    // A small preview of each page, for naming the floors before any are created. Each page opens the document inside the PDFium lock rather than holding
+    // the lock across the whole enumeration; stop early with the token (the dialog
+    // closing).
+    public static IEnumerable<(int Page, System.Drawing.Bitmap Thumbnail)> ReadPagePreviews(
+        string path, int width, int height, System.Threading.CancellationToken token)
+    {
+        int count = CountPages(path);
+        for (int page = 0; page < count && !token.IsCancellationRequested; page++)
+        {
+            System.Drawing.Bitmap thumb;
+            lock (PdfiumLock)
+            {
+                using var doc = DocLib.Instance.GetDocReader(path, new PageDimensions(Math.Min(width, height), Math.Max(width, height)));
+                using var reader = doc.GetPageReader(page);
+                int w = reader.GetPageWidth(), h = reader.GetPageHeight();
+                var bgra = reader.GetImage();
+                thumb = new System.Drawing.Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                var data = thumb.LockBits(new System.Drawing.Rectangle(0, 0, w, h),
+                    System.Drawing.Imaging.ImageLockMode.WriteOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                System.Runtime.InteropServices.Marshal.Copy(bgra, 0, data.Scan0, Math.Min(bgra.Length, data.Stride * h));
+                thumb.UnlockBits(data);
+            }
+            yield return (page, thumb);
+        }
+    }
 }

@@ -246,39 +246,103 @@ public sealed class FloorPlanPage : UserControl
         {
             Filter = PlanFileFilter,
             Title = "Open floor plan",
+            Multiselect = true,   // a site may send one PDF per floor
         };
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
-        // Already open: go to its first floor rather than adding the drawing again
-        // (Mike, 2026-11-25: importing the same DWG twice listed it twice).
-        var existing = _floors.FirstOrDefault(f => string.Equals(
-            Path.GetFullPath(f.DwgPath), Path.GetFullPath(dlg.FileName), StringComparison.OrdinalIgnoreCase));
-        if (existing != null)
+        SetStatus("Checking the files...");
+        UseWaitCursor = true;
+        List<(string Path, string Hash)> picked;
+        Dictionary<string, PlanFloor> known;
+        try
         {
-            await ShowFloorAsync(existing);
-            SetStatus("That drawing is already open: its floors are in the Floor list.");
+            picked = await Task.Run(() => dlg.FileNames.Select(f => (f, FileHash(f))).ToList());
+            known = await Task.Run(() => KnownFiles());
+        }
+        catch (Exception ex)
+        {
+            SetStatus("Could not read the file: " + ex.Message);
             return;
         }
-
-        if (IsPdf(dlg.FileName))
+        finally
         {
-            await OpenPdfAsync(dlg.FileName);
-            return;
+            UseWaitCursor = false;
         }
 
-        var plan = await LoadPlanAsync(dlg.FileName, 0);
-        if (plan == null) return;
+        // A file is a duplicate if it is already set up (same content, wherever it is
+        // now saved), or if the same content was picked twice in this go.
+        var seen = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); // hash -> first file picked
+        string? Duplicate(string path, string hash)
+        {
+            if (known.TryGetValue(hash, out var floor))
+                return $"Already set up as \"{floor.Name}\".";
+            if (seen.TryGetValue(hash, out var first))
+                return $"Same file as {Path.GetFileName(first)}.";
+            seen[hash] = path;
+            return null;
+        }
+
+        var dwgs = picked.Where(p => !IsPdf(p.Path)).ToList();
+        var pdfs = picked.Where(p => IsPdf(p.Path)).ToList();
+        var skipped = new List<string>();
+        PlanFloor? firstNew = null;
+
+        foreach (var (path, hash) in dwgs)
+        {
+            var dup = Duplicate(path, hash);
+            if (dup != null) { skipped.Add($"{Path.GetFileName(path)}: {dup}"); continue; }
+            var floors = await AddDwgFloorsAsync(path, hash);
+            firstNew ??= floors.FirstOrDefault();
+        }
+
+        if (pdfs.Count > 0)
+        {
+            var choices = new List<PdfChoice>();
+            foreach (var (path, hash) in pdfs)
+            {
+                var dup = Duplicate(path, hash);
+                int pages;
+                try { pages = await Task.Run(() => PdfPlan.CountPages(path)); }
+                catch (Exception ex) { skipped.Add($"{Path.GetFileName(path)}: could not be read ({ex.Message})"); continue; }
+                choices.Add(new PdfChoice(path, pages, dup));
+            }
+
+            if (choices.Count > 0)
+            {
+                using var naming = new FloorNamingDialog(choices, _floors.Select(f => f.Name));
+                if (naming.ShowDialog(this) == DialogResult.OK)
+                {
+                    var hashes = pdfs.ToDictionary(p => p.Path, p => p.Hash, StringComparer.OrdinalIgnoreCase);
+                    foreach (var (path, page, name) in naming.Floors)
+                    {
+                        var floor = new PlanFloor { Name = name, DwgPath = path, Page = page, FileHash = hashes[path] };
+                        _repo.SaveFloor(floor);
+                        firstNew ??= floor;
+                    }
+                }
+            }
+        }
+
+        RefreshFloorBox();
+        if (firstNew != null) await ShowFloorAsync(firstNew);
+        SetStatus(skipped.Count == 0 ? "" : "Not added again: " + string.Join("  ", skipped));
+    }
+
+    // A DWG becomes one floor per plan found on the sheet (Mike's X-Ref Basement-5th
+    // Floors has all seven side by side), each cropped to its plan; a single plan
+    // stays one floor showing the whole drawing.
+    private async Task<List<PlanFloor>> AddDwgFloorsAsync(string path, string hash)
+    {
+        var plan = await LoadPlanAsync(path, 0);
+        if (plan == null) return new List<PlanFloor>();
         var hidden = plan.Layers.Where(l => l.InitiallyHidden).Select(l => l.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var name = Path.GetFileNameWithoutExtension(dlg.FileName);
+        var name = Path.GetFileNameWithoutExtension(path);
 
-        // A sheet with several plans on it (Mike's X-Ref Basement-5th Floors has all
-        // seven side by side) becomes one floor per plan, each cropped to its plan;
-        // a single plan stays one floor showing the whole drawing.
         var areas = await Task.Run(() => plan.FindFloorAreas());
         var floors = new List<PlanFloor>();
         if (areas.Count <= 1)
         {
-            floors.Add(new PlanFloor { Name = name, DwgPath = dlg.FileName, HiddenLayers = hidden });
+            floors.Add(new PlanFloor { Name = name, DwgPath = path, HiddenLayers = hidden, FileHash = hash });
         }
         else
         {
@@ -288,7 +352,8 @@ public sealed class FloorPlanPage : UserControl
                 floors.Add(new PlanFloor
                 {
                     Name = $"{name} ({i + 1} of {areas.Count})",
-                    DwgPath = dlg.FileName,
+                    DwgPath = path,
+                    FileHash = hash,
                     CropLeft = a.Left + plan.OriginX,
                     CropBottom = a.Top + plan.OriginY,   // SKRect Top is the low Y here (plan Y is up)
                     CropRight = a.Right + plan.OriginX,
@@ -296,12 +361,33 @@ public sealed class FloorPlanPage : UserControl
                     HiddenLayers = new HashSet<string>(hidden, StringComparer.OrdinalIgnoreCase),
                 });
             }
+            SetStatus($"Found {areas.Count} floors on {Path.GetFileName(path)}: rename them from the Plan menu.");
         }
         foreach (var f in floors) _repo.SaveFloor(f);
-        RefreshFloorBox();
-        await ShowFloorAsync(floors[0]);
-        if (floors.Count > 1)
-            SetStatus($"Found {floors.Count} floors on this drawing: pick one in the Floor list, and rename them from the Plan menu.");
+        return floors;
+    }
+
+    // Every drawing file already set up, by content fingerprint.  Floors set up before
+    // fingerprints were kept get theirs now, from the file if it's still there.
+    private Dictionary<string, PlanFloor> KnownFiles()
+    {
+        var known = new Dictionary<string, PlanFloor>(StringComparer.OrdinalIgnoreCase);
+        foreach (var f in _repo.GetFloors())
+        {
+            if (string.IsNullOrEmpty(f.FileHash) && File.Exists(f.DwgPath))
+            {
+                f.FileHash = FileHash(f.DwgPath);
+                _repo.SaveFloor(f);
+            }
+            if (!string.IsNullOrEmpty(f.FileHash) && !known.ContainsKey(f.FileHash)) known[f.FileHash] = f;
+        }
+        return known;
+    }
+
+    private static string FileHash(string path)
+    {
+        using var stream = File.OpenRead(path);
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream));
     }
 
     // Every file type a floor plan can be opened from, in one filter, so the dialog
@@ -311,33 +397,6 @@ public sealed class FloorPlanPage : UserControl
         $"Floor plans ({string.Join("; ", PlanExtensions.Select(e => "*." + e))})|{string.Join(";", PlanExtensions.Select(e => "*." + e))}";
 
     private static bool IsPdf(string path) => Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase);
-
-    // A PDF becomes one floor per page, named by page when there's more than one.
-    private async Task OpenPdfAsync(string path)
-    {
-        int pages;
-        try
-        {
-            pages = await Task.Run(() => PdfPlan.CountPages(path));
-        }
-        catch (Exception ex)
-        {
-            SetStatus("Could not read the PDF: " + ex.Message);
-            return;
-        }
-        var name = Path.GetFileNameWithoutExtension(path);
-        var floors = Enumerable.Range(0, pages).Select(i => new PlanFloor
-        {
-            Name = pages == 1 ? name : $"{name} (page {i + 1} of {pages})",
-            DwgPath = path,
-            Page = i,
-        }).ToList();
-        foreach (var f in floors) _repo.SaveFloor(f);
-        RefreshFloorBox();
-        await ShowFloorAsync(floors[0]);
-        if (pages > 1)
-            SetStatus($"{pages} pages, one floor each: pick one in the Floor list, and rename them from the Plan menu.");
-    }
 
     private async Task<IPlanSource?> LoadPlanAsync(string path, int page)
     {
