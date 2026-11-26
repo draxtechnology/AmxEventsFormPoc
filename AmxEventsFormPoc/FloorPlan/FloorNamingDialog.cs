@@ -9,9 +9,11 @@ using System.Windows.Forms;
 
 namespace AmxEventsFormPoc.FloorPlan;
 
-// A PDF chosen in Open floor plan: its page count, and if it's a duplicate, why
-// (already set up as a floor, or the same file as another one picked).
-public sealed record PdfChoice(string Path, int Pages, string? Duplicate);
+// A PDF chosen in Open floor plan: its page count; if the whole file is a duplicate
+// of another one picked, why; and any pages already set up as floors (page -> why),
+// so a file opened again in a later stage offers only the pages not yet added.
+public sealed record PdfChoice(string Path, int Pages, string? Duplicate,
+                               IReadOnlyDictionary<int, string>? PagesDone = null);
 
 // Shown when PDFs are opened.  A site may send one PDF per floor, or one PDF with a
 // page per floor, and a PDF (unlike a DWG) doesn't say which floor it is.  So before
@@ -19,9 +21,8 @@ public sealed record PdfChoice(string Path, int Pages, string? Duplicate);
 // that aren't (cover sheets, legends, schedules).  No name is assumed from the
 // drawing or the file name: the person setting up the site types every one.  Nothing
 // is created until OK, every included page has a name, and no name clashes with
-// another page or an existing floor.  Duplicate
-// files are listed, unticked, with the reason, and can't be included.  Cancel creates
-// nothing.
+// another page or an existing floor.  Duplicate files, and pages already set up,
+// are listed unticked with the reason and can't be included.  Cancel creates nothing.
 public sealed class FloorNamingDialog : Form
 {
     private const int ThumbW = 200, ThumbH = 142;
@@ -82,14 +83,16 @@ public sealed class FloorNamingDialog : Form
             if (f.Duplicate != null)
             {
                 // One row for the whole file: it isn't added.
-                var dup = BuildRow(f.Path, 0, f.Pages, f.Duplicate);
+                var dup = BuildRow(f.Path, 0, f.Pages, f.Duplicate, wholeFile: true);
                 _rows.Add(dup);
                 list.Controls.Add(dup.Panel);
                 continue;
             }
             for (int page = 0; page < f.Pages; page++)
             {
-                var row = BuildRow(f.Path, page, f.Pages, null);
+                string? done = null;
+                f.PagesDone?.TryGetValue(page, out done);
+                var row = BuildRow(f.Path, page, f.Pages, done, wholeFile: false);
                 _rows.Add(row);
                 list.Controls.Add(row.Panel);
             }
@@ -115,7 +118,7 @@ public sealed class FloorNamingDialog : Form
         FormClosed += (_, _) => _cts.Cancel();
     }
 
-    private Row BuildRow(string path, int page, int pages, string? duplicate)
+    private Row BuildRow(string path, int page, int pages, string? duplicate, bool wholeFile)
     {
         var row = new Row { Path = path, Page = page, Duplicate = duplicate != null };
         row.Panel = new Panel { Width = 780, Height = ThumbH + 12, Margin = new Padding(0, 0, 0, 6), BorderStyle = BorderStyle.FixedSingle };
@@ -128,7 +131,7 @@ public sealed class FloorNamingDialog : Form
         int x = ThumbW + 48;
         var fileLabel = new Label
         {
-            Text = Path.GetFileName(path) + (pages > 1 && duplicate == null ? $"  ·  page {page + 1} of {pages}" : ""),
+            Text = Path.GetFileName(path) + (pages > 1 && !wholeFile ? $"  ·  page {page + 1} of {pages}" : ""),
             Location = new Point(x, 14), Width = 500, AutoEllipsis = true, Font = new Font(Font, FontStyle.Bold),
         };
         var nameLabel = new Label { Text = "Floor name", Location = new Point(x, 50), AutoSize = true };

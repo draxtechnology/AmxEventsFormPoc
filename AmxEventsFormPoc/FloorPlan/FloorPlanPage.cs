@@ -214,6 +214,7 @@ public sealed class FloorPlanPage : UserControl
     {
         var plan = new ToolStripDropDownButton("Plan");
         plan.DropDownItems.Add("Open floor plan...", null, async (_, _) => await OpenDrawingAsync());
+        plan.DropDownItems.Add("Replace drawing for this floor...", null, async (_, _) => await ReplaceDrawingAsync());
         plan.DropDownItems.Add("Import panel configuration (SKF or NCF)...", null, async (_, _) => await ImportConfigAsync());
         plan.DropDownItems.Add(new ToolStripSeparator());
         plan.DropDownItems.Add("New floor from an area of this drawing", null, (_, _) => StartAreaFloor());
@@ -253,11 +254,11 @@ public sealed class FloorPlanPage : UserControl
         SetStatus("Checking the files...");
         UseWaitCursor = true;
         List<(string Path, string Hash)> picked;
-        Dictionary<string, PlanFloor> known;
+        List<PlanFloor> known;
         try
         {
             picked = await Task.Run(() => dlg.FileNames.Select(f => (f, FileHash(f))).ToList());
-            known = await Task.Run(() => KnownFiles());
+            known = await Task.Run(() => KnownFloors());
         }
         catch (Exception ex)
         {
@@ -269,18 +270,26 @@ public sealed class FloorPlanPage : UserControl
             UseWaitCursor = false;
         }
 
-        // A file is a duplicate if it is already set up (same content, wherever it is
-        // now saved), or if the same content was picked twice in this go.
-        var seen = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); // hash -> first file picked
-        string? Duplicate(string path, string hash)
+        // Files are matched on content (SHA-256), wherever they are now saved.  A DWG
+        // already set up is skipped whole; a PDF is checked page by page, so a file
+        // opened again in a later stage offers just the pages not yet added.  The same
+        // content picked twice in one go is skipped after the first.
+        var knownDwg = new Dictionary<string, PlanFloor>(StringComparer.OrdinalIgnoreCase);
+        var knownPdfPages = new Dictionary<(string Hash, int Page), PlanFloor>();
+        foreach (var f in known.Where(f => f.FileHash.Length > 0))
         {
-            if (known.TryGetValue(hash, out var floor))
-                return $"Already set up as \"{floor.Name}\".";
-            if (seen.TryGetValue(hash, out var first))
-                return $"Same file as {Path.GetFileName(first)}.";
+            if (IsPdf(f.DwgPath)) knownPdfPages.TryAdd((f.FileHash.ToUpperInvariant(), f.Page), f);
+            else knownDwg.TryAdd(f.FileHash, f);
+        }
+        var seen = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); // hash -> first file picked
+        string? PickedTwice(string path, string hash)
+        {
+            if (seen.TryGetValue(hash, out var first)) return $"Same file as {Path.GetFileName(first)}.";
             seen[hash] = path;
             return null;
         }
+        string? Duplicate(string path, string hash) =>
+            knownDwg.TryGetValue(hash, out var floor) ? $"Already set up as \"{floor.Name}\"." : PickedTwice(path, hash);
 
         var dwgs = picked.Where(p => !IsPdf(p.Path)).ToList();
         var pdfs = picked.Where(p => IsPdf(p.Path)).ToList();
@@ -300,11 +309,14 @@ public sealed class FloorPlanPage : UserControl
             var choices = new List<PdfChoice>();
             foreach (var (path, hash) in pdfs)
             {
-                var dup = Duplicate(path, hash);
+                var dup = PickedTwice(path, hash);
                 int pages;
                 try { pages = await Task.Run(() => PdfPlan.CountPages(path)); }
                 catch (Exception ex) { skipped.Add($"{Path.GetFileName(path)}: could not be read ({ex.Message})"); continue; }
-                choices.Add(new PdfChoice(path, pages, dup));
+                var done = Enumerable.Range(0, pages)
+                    .Where(pg => knownPdfPages.ContainsKey((hash.ToUpperInvariant(), pg)))
+                    .ToDictionary(pg => pg, pg => $"Already set up as \"{knownPdfPages[(hash.ToUpperInvariant(), pg)].Name}\".");
+                choices.Add(new PdfChoice(path, pages, dup, done));
             }
 
             if (choices.Count > 0)
@@ -331,6 +343,169 @@ public sealed class FloorPlanPage : UserControl
     // A DWG becomes one floor per plan found on the sheet (Mike's X-Ref Basement-5th
     // Floors has all seven side by side), each cropped to its plan; a single plan
     // stays one floor showing the whole drawing.
+    // A new revision of a floor's drawing ("Level 2 Rev B"): the floor keeps its
+    // name, crop, hidden layers and placed devices, and only its drawing changes.
+    // Device positions are stored in the drawing's own coordinates, so they carry
+    // over when the revision keeps the same sheet layout, as revisions normally do.
+    // Guarded so it can't quietly misplace devices:
+    //  - PDF for PDF and DWG for DWG only: the two have unrelated coordinates;
+    //  - not the file the floor already uses, nor one that is another floor's drawing;
+    //  - a PDF page of a different size asks whether to scale the device positions;
+    //  - a DWG that doesn't cover the same area asks before replacing;
+    //  - a DWG shared by several floors (one sheet, many plans) asks whether to
+    //    replace it for all of them.
+    private async Task ReplaceDrawingAsync()
+    {
+        if (_floor == null || _plan == null) { SetStatus("Open a floor plan first."); return; }
+        var floor = _floor;
+        var oldPlan = _plan;
+        bool pdf = IsPdf(floor.DwgPath);
+
+        using var dlg = new OpenFileDialog
+        {
+            Filter = pdf ? "PDF floor plans (*.pdf)|*.pdf" : "AutoCAD floor plans (*.dwg)|*.dwg",
+            Title = $"Replace the drawing for {floor.Name}",
+        };
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        var path = dlg.FileName;
+
+        string hash;
+        List<PlanFloor> known;
+        try
+        {
+            hash = await Task.Run(() => FileHash(path));
+            known = await Task.Run(() => KnownFloors());
+        }
+        catch (Exception ex)
+        {
+            SetStatus("Could not read the file: " + ex.Message);
+            return;
+        }
+
+        int page = 0;
+        if (pdf)
+        {
+            int pages;
+            try { pages = await Task.Run(() => PdfPlan.CountPages(path)); }
+            catch (Exception ex) { SetStatus("Could not read the PDF: " + ex.Message); return; }
+            if (pages > 1)
+            {
+                var answer = Microsoft.VisualBasic.Interaction.InputBox(
+                    $"{Path.GetFileName(path)} has {pages} pages.  Which page is {floor.Name}?",
+                    "Replace drawing", Math.Min(floor.Page + 1, pages).ToString());
+                if (answer.Length == 0) return;
+                if (!int.TryParse(answer, out var n) || n < 1 || n > pages)
+                {
+                    MessageBox.Show(this, $"Enter a page number from 1 to {pages}.", "Replace drawing", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                page = n - 1;
+            }
+        }
+
+        bool Same(PlanFloor f) => f.FileHash.Equals(hash, StringComparison.OrdinalIgnoreCase) && (!pdf || f.Page == page);
+        if (Same(floor))
+        {
+            MessageBox.Show(this, $"That’s the drawing {floor.Name} already uses.", "Replace drawing", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        // The floors that share this floor's drawing (a DWG sheet split into floors).
+        var group = new List<PlanFloor> { known.First(f => f.Id == floor.Id) };
+        if (!pdf)
+        {
+            var sharing = known.Where(f => f.Id != floor.Id && !IsPdf(f.DwgPath) &&
+                (string.Equals(f.DwgPath, floor.DwgPath, StringComparison.OrdinalIgnoreCase) ||
+                 (f.FileHash.Length > 0 && f.FileHash.Equals(floor.FileHash, StringComparison.OrdinalIgnoreCase)))).ToList();
+            if (sharing.Count > 0)
+            {
+                var all = MessageBox.Show(this,
+                    $"This drawing is used by {sharing.Count + 1} floors: {string.Join(", ", new[] { floor }.Concat(sharing).Select(f => f.Name))}.\n\n" +
+                    "Yes: replace it for all of them (a new revision of the whole sheet).\n" +
+                    $"No: replace it for {floor.Name} only.",
+                    "Replace drawing", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+                if (all == DialogResult.Cancel) return;
+                if (all == DialogResult.Yes) group.AddRange(sharing);
+            }
+        }
+
+        var clash = known.FirstOrDefault(f => !group.Any(g => g.Id == f.Id) && Same(f));
+        if (clash != null)
+        {
+            MessageBox.Show(this, $"That drawing is already used by the floor \"{clash.Name}\".", "Replace drawing", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        var newPlan = await LoadPlanAsync(path, page);
+        if (newPlan == null) return;
+
+        float sx = 1, sy = 1;
+        if (pdf)
+        {
+            var o = oldPlan.Extents;
+            var n = newPlan.Extents;
+            if (Math.Abs(n.Width - o.Width) > o.Width * 0.01f || Math.Abs(n.Height - o.Height) > o.Height * 0.01f)
+            {
+                static string Mm(SKRect r) => $"{r.Width * 25.4f / 72:F0} x {r.Height * 25.4f / 72:F0} mm";
+                var scale = MessageBox.Show(this,
+                    $"The new page is a different size ({Mm(n)}, was {Mm(o)}).\n\n" +
+                    "Yes: scale the placed devices to the new page (the same drawing at a different paper size).\n" +
+                    "No: keep the devices where they are.\n" +
+                    "Cancel: don’t replace the drawing.",
+                    "Replace drawing", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning);
+                if (scale == DialogResult.Cancel) return;
+                if (scale == DialogResult.Yes) { sx = n.Width / o.Width; sy = n.Height / o.Height; }
+            }
+        }
+        else
+        {
+            // In true drawing coordinates, how much of each floor's area does the new
+            // drawing cover?
+            var newWorld = new SKRect((float)(newPlan.Extents.Left + newPlan.OriginX), (float)(newPlan.Extents.Top + newPlan.OriginY),
+                                      (float)(newPlan.Extents.Right + newPlan.OriginX), (float)(newPlan.Extents.Bottom + newPlan.OriginY));
+            var poor = group.Where(f =>
+            {
+                var area = f.HasCrop
+                    ? new SKRect((float)f.CropLeft!.Value, (float)f.CropBottom!.Value, (float)f.CropRight!.Value, (float)f.CropTop!.Value)
+                    : new SKRect((float)(oldPlan.Extents.Left + oldPlan.OriginX), (float)(oldPlan.Extents.Top + oldPlan.OriginY),
+                                 (float)(oldPlan.Extents.Right + oldPlan.OriginX), (float)(oldPlan.Extents.Bottom + oldPlan.OriginY));
+                var overlap = SKRect.Intersect(area, newWorld);
+                return overlap.IsEmpty || overlap.Width * overlap.Height < area.Width * area.Height * 0.5f;
+            }).ToList();
+            if (poor.Count > 0 && MessageBox.Show(this,
+                    $"The new drawing doesn’t cover the same area as {string.Join(", ", poor.Select(f => f.Name))}, " +
+                    "so the placed devices may land in the wrong place.\n\nReplace it anyway?",
+                    "Replace drawing", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
+        }
+
+        foreach (var f in group)
+        {
+            f.DwgPath = path;
+            f.Page = page;
+            f.FileHash = hash;
+            if (f.HasCrop && (sx != 1 || sy != 1))
+            {
+                f.CropLeft *= sx; f.CropRight *= sx;
+                f.CropBottom *= sy; f.CropTop *= sy;
+            }
+            _repo.SaveFloor(f);
+        }
+        int devices = 0;
+        foreach (var p in _placed.Values.Where(p => group.Any(g => g.Id == p.FloorId)).ToList())
+        {
+            devices++;
+            if (sx == 1 && sy == 1) continue;
+            var moved = p with { X = p.X * sx, Y = p.Y * sy };
+            _repo.PlaceDevice(moved);
+            _placed[p.Key] = moved;
+        }
+
+        RefreshFloorBox();
+        await ShowFloorAsync(group[0]);
+        SetStatus($"Replaced the drawing for {string.Join(", ", group.Select(f => f.Name))}; " +
+                  $"{devices} placed device{(devices == 1 ? "" : "s")} kept{(sx != 1 || sy != 1 ? ", scaled to the new page" : "")}.");
+    }
+
     private async Task<List<PlanFloor>> AddDwgFloorsAsync(string path, string hash)
     {
         var plan = await LoadPlanAsync(path, 0);
@@ -367,21 +542,20 @@ public sealed class FloorPlanPage : UserControl
         return floors;
     }
 
-    // Every drawing file already set up, by content fingerprint.  Floors set up before
+    // Every floor set up, with its file's content fingerprint.  Floors set up before
     // fingerprints were kept get theirs now, from the file if it's still there.
-    private Dictionary<string, PlanFloor> KnownFiles()
+    private List<PlanFloor> KnownFloors()
     {
-        var known = new Dictionary<string, PlanFloor>(StringComparer.OrdinalIgnoreCase);
-        foreach (var f in _repo.GetFloors())
+        var floors = _repo.GetFloors();
+        foreach (var f in floors)
         {
             if (string.IsNullOrEmpty(f.FileHash) && File.Exists(f.DwgPath))
             {
                 f.FileHash = FileHash(f.DwgPath);
                 _repo.SaveFloor(f);
             }
-            if (!string.IsNullOrEmpty(f.FileHash) && !known.ContainsKey(f.FileHash)) known[f.FileHash] = f;
         }
-        return known;
+        return floors;
     }
 
     private static string FileHash(string path)
