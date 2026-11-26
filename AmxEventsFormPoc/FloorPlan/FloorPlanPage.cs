@@ -219,7 +219,9 @@ public sealed class FloorPlanPage : UserControl
         plan.DropDownItems.Add(new ToolStripSeparator());
         plan.DropDownItems.Add("New floor from an area of this drawing", null, (_, _) => StartAreaFloor());
         plan.DropDownItems.Add("Rename floor...", null, (_, _) => RenameFloor());
-        plan.DropDownItems.Add("Remove floor", null, (_, _) => RemoveFloor());
+        plan.DropDownItems.Add("Remove this floor", null, (_, _) => RemoveFloor());
+        plan.DropDownItems.Add("Remove floors...", null, (_, _) => RemoveFloors());
+        plan.DropDownItems.Add("Remove all floors...", null, (_, _) => RemoveFloors(all: true));
         plan.DropDownItems.Add(new ToolStripSeparator());
         plan.DropDownItems.Add("Layers...", null, (_, _) => ChooseLayers());
         plan.DropDownItems.Add("AMX node offset...", null, (_, _) => SetNodeOffset());
@@ -673,7 +675,7 @@ public sealed class FloorPlanPage : UserControl
         if (_floor == null) return;
         int onFloor = _placed.Values.Count(p => p.FloorId == _floor.Id);
         if (MessageBox.Show(this, $"Remove the floor \"{_floor.Name}\"" + (onFloor > 0 ? $" and the {onFloor} device(s) placed on it" : "") + "?",
-                "Remove floor", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
+                "Remove floor", MessageBoxButtons.OKCancel, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.OK) return;
         _repo.DeleteFloor(_floor.Id);
         _placed = _repo.GetPlacedDevices().ToDictionary(p => p.Key);
         _floor = null;
@@ -681,7 +683,49 @@ public sealed class FloorPlanPage : UserControl
         RefreshFloorBox();
         if (_floors.Count > 0) await ShowFloorAsync(_floors[0]);
         else { _canvas.SetPlan(null, SKRect.Empty); RefreshCanvasItems(); }
-        _list.Invalidate();
+        FilterList(); // its devices are back as not yet placed
+    }
+
+    // Several floors at once: all the floors from one file (a DWG sheet's seven, a
+    // PDF set a site has replaced), or everything.  The dialog lists them by file
+    // with device counts; this confirms with the totals before removing anything.
+    private async void RemoveFloors(bool all = false)
+    {
+        var floors = _repo.GetFloors();
+        if (floors.Count == 0) { SetStatus("There are no floors to remove."); return; }
+        var counts = _placed.Values.GroupBy(p => p.FloorId).ToDictionary(g => g.Key, g => g.Count());
+
+        using var dlg = new RemoveFloorsDialog(floors, counts, selectAll: all);
+        if (dlg.ShowDialog(this) != DialogResult.OK || dlg.Selected.Count == 0) return;
+        var chosen = dlg.Selected.ToList();
+        int devices = chosen.Sum(f => counts.TryGetValue(f.Id, out var n) ? n : 0);
+        // Cancel is the default button: Enter must never remove floors.  Removing every
+        // floor says so in as many words.
+        bool everything = chosen.Count == floors.Count;
+        if (MessageBox.Show(this,
+                (everything ? $"Remove ALL {chosen.Count} floors" : $"Remove {chosen.Count} floor{(chosen.Count == 1 ? "" : "s")}") +
+                (devices > 0 ? $" and the {devices} device{(devices == 1 ? "" : "s")} placed on {(chosen.Count == 1 ? "it" : "them")}" : "") +
+                "?\n\n" + (everything ? "The plan will be empty until a floor plan is opened again.  " : "") + "This can’t be undone.",
+                everything ? "Remove all floors" : "Remove floors",
+                MessageBoxButtons.OKCancel, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.OK) return;
+
+        foreach (var f in chosen) _repo.DeleteFloor(f.Id);
+        bool currentGone = _floor != null && chosen.Any(f => f.Id == _floor.Id);
+        _placed = _repo.GetPlacedDevices().ToDictionary(p => p.Key);
+        if (currentGone) { _floor = null; _plan = null; }
+        RefreshFloorBox();
+        if (currentGone)
+        {
+            if (_floors.Count > 0) await ShowFloorAsync(_floors[0]);
+            else { _canvas.SetPlan(null, SKRect.Empty); RefreshCanvasItems(); }
+        }
+        else
+        {
+            RefreshCanvasItems();
+        }
+        FilterList();
+        SetStatus($"Removed {chosen.Count} floor{(chosen.Count == 1 ? "" : "s")}" +
+                  (devices > 0 ? $"; {devices} device{(devices == 1 ? " is" : "s are")} back in the list as not placed." : "."));
     }
 
     private async void ChooseLayers()
