@@ -35,6 +35,10 @@ public sealed class FloorPlanPage : UserControl
     private IPlanSource? _plan;
     // Keyed on file and page: a PDF's pages are separate plans.
     private readonly Dictionary<string, IPlanSource> _planCache = new(StringComparer.OrdinalIgnoreCase);
+    // Most recently used first.  A PDF page held in memory is tens of MB, so only the
+    // last few are kept (the one on screen is never dropped).
+    private readonly List<string> _planCacheOrder = new();
+    private const int PlanCacheSize = 4;
     private int _nodeOffset;
     private List<PanelDevice> _listRows = new();
     private string? _slideKey;
@@ -62,7 +66,7 @@ public sealed class FloorPlanPage : UserControl
 
     private readonly Label _sTitle = new() { Dock = DockStyle.Top, Height = 48, Font = new Font("Segoe UI", 12f, FontStyle.Bold) };
     private readonly Label _sState = new() { Dock = DockStyle.Top, Height = 30, Font = new Font("Segoe UI", 10f, FontStyle.Bold), TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(6, 0, 0, 0) };
-    private readonly Label _sDetails = new() { Dock = DockStyle.Top, Height = 132 };
+    private readonly Label _sDetails = new() { Dock = DockStyle.Top, Height = 132, Font = new Font("Consolas", 9f) };
     private readonly Label _sSymbolLabel = new() { Dock = DockStyle.Top, Height = 22, Text = "Symbol" };
     private readonly ComboBox _sSymbol = new() { Dock = DockStyle.Top, DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly Label _sSymbolNote = new() { Dock = DockStyle.Top, Height = 38, ForeColor = Color.DimGray, Font = new Font("Segoe UI", 8f) };
@@ -260,7 +264,7 @@ public sealed class FloorPlanPage : UserControl
         try
         {
             picked = await Task.Run(() => dlg.FileNames.Select(f => (f, FileHash(f))).ToList());
-            known = await Task.Run(() => KnownFloors());
+            known = await KnownFloorsAsync();
         }
         catch (Exception ex)
         {
@@ -321,6 +325,36 @@ public sealed class FloorPlanPage : UserControl
                 choices.Add(new PdfChoice(path, pages, dup, done));
             }
 
+            // Just one new page (one PDF, one page, not already set up): nothing to tell
+            // apart, so skip the naming step.  The floor takes the file's name, made
+            // unique if it's taken, and can be renamed later from the Plan menu.
+            bool single = picked.Count == 1 && choices.Count == 1 && choices[0].Pages == 1
+                          && choices[0].Duplicate == null && (choices[0].PagesDone?.Count ?? 0) == 0;
+            if (single)
+            {
+                var c = choices[0];
+                // Read it first: a PDF that won't render isn't added, and the reason
+                // stays in the status bar.
+                if (await LoadPlanAsync(c.Path, 0) == null) return;
+                var name = UniqueFloorName(Path.GetFileNameWithoutExtension(c.Path));
+                var floor = new PlanFloor { Name = name, DwgPath = c.Path, Page = 0, FileHash = pdfs[0].Hash };
+                _repo.SaveFloor(floor);
+                RefreshFloorBox();
+                if (await ShowFloorAsync(floor))
+                    SetStatus($"Added as \"{name}\": rename it from Plan > Rename floor if that isn’t the floor’s name.");
+                return;
+            }
+            if (picked.Count == 1 && choices.Count == 1 && choices[0].Pages == 1 &&
+                (choices[0].Duplicate != null || (choices[0].PagesDone?.Count ?? 0) > 0))
+            {
+                // A single file that's already set up: say so rather than open a dialog
+                // with nothing in it to add.
+                var why = choices[0].Duplicate ?? choices[0].PagesDone!.Values.First();
+                RefreshFloorBox();
+                SetStatus($"{Path.GetFileName(choices[0].Path)} wasn’t added: {why}");
+                return;
+            }
+
             if (choices.Count > 0)
             {
                 using var naming = new FloorNamingDialog(choices, _floors.Select(f => f.Name));
@@ -376,7 +410,7 @@ public sealed class FloorPlanPage : UserControl
         try
         {
             hash = await Task.Run(() => FileHash(path));
-            known = await Task.Run(() => KnownFloors());
+            known = await KnownFloorsAsync();
         }
         catch (Exception ex)
         {
@@ -406,14 +440,16 @@ public sealed class FloorPlanPage : UserControl
         }
 
         bool Same(PlanFloor f) => f.FileHash.Equals(hash, StringComparison.OrdinalIgnoreCase) && (!pdf || f.Page == page);
-        if (Same(floor))
+        // The stored copy: an older floor's fingerprint is only filled in there.
+        var stored = known.FirstOrDefault(f => f.Id == floor.Id) ?? floor;
+        if (Same(stored))
         {
             MessageBox.Show(this, $"That’s the drawing {floor.Name} already uses.", "Replace drawing", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
         // The floors that share this floor's drawing (a DWG sheet split into floors).
-        var group = new List<PlanFloor> { known.First(f => f.Id == floor.Id) };
+        var group = new List<PlanFloor> { stored };
         if (!pdf)
         {
             var sharing = known.Where(f => f.Id != floor.Id && !IsPdf(f.DwgPath) &&
@@ -546,18 +582,32 @@ public sealed class FloorPlanPage : UserControl
 
     // Every floor set up, with its file's content fingerprint.  Floors set up before
     // fingerprints were kept get theirs now, from the file if it's still there.
-    private List<PlanFloor> KnownFloors()
+    // The database is only touched on the UI thread (one SqliteConnection, not safe
+    // across threads); only the file hashing runs in the background.
+    private async Task<List<PlanFloor>> KnownFloorsAsync()
     {
         var floors = _repo.GetFloors();
-        foreach (var f in floors)
+        var missing = floors.Where(f => string.IsNullOrEmpty(f.FileHash) && File.Exists(f.DwgPath)).ToList();
+        if (missing.Count > 0)
         {
-            if (string.IsNullOrEmpty(f.FileHash) && File.Exists(f.DwgPath))
+            var hashes = await Task.Run(() => missing.Select(f => FileHash(f.DwgPath)).ToList());
+            for (int i = 0; i < missing.Count; i++)
             {
-                f.FileHash = FileHash(f.DwgPath);
-                _repo.SaveFloor(f);
+                missing[i].FileHash = hashes[i];
+                _repo.SaveFloor(missing[i]);
             }
         }
         return floors;
+    }
+
+    // A floor name not already in use: "Level 2", else "Level 2 (2)", "Level 2 (3)"...
+    private string UniqueFloorName(string wanted)
+    {
+        var taken = new HashSet<string>(_repo.GetFloors().Select(f => f.Name.Trim()), StringComparer.OrdinalIgnoreCase);
+        var name = string.IsNullOrWhiteSpace(wanted) ? "Floor" : wanted.Trim();
+        if (!taken.Contains(name)) return name;
+        for (int i = 2; ; i++)
+            if (!taken.Contains($"{name} ({i})")) return $"{name} ({i})";
     }
 
     private static string FileHash(string path)
@@ -574,14 +624,32 @@ public sealed class FloorPlanPage : UserControl
 
     private static bool IsPdf(string path) => Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase);
 
+    private void TrimPlanCache()
+    {
+        for (int i = _planCacheOrder.Count - 1; i >= PlanCacheSize; i--)
+        {
+            var key = _planCacheOrder[i];
+            if (_planCache.TryGetValue(key, out var plan) && ReferenceEquals(plan, _plan)) continue; // on screen
+            _planCacheOrder.RemoveAt(i);
+            if (_planCache.Remove(key, out var gone)) gone.Dispose();
+        }
+    }
+
     private async Task<IPlanSource?> LoadPlanAsync(string path, int page)
     {
-        var key = path + "|" + page;
-        if (_planCache.TryGetValue(key, out var cached)) return cached;
         if (!File.Exists(path))
         {
             SetStatus("Drawing not found: " + path);
             return null;
+        }
+        // Keyed on the file as it is now: a revision saved over the old file at the same
+        // path has a new write time, so it's read again rather than served stale.
+        var key = path + "|" + page + "|" + File.GetLastWriteTimeUtc(path).Ticks;
+        if (_planCache.TryGetValue(key, out var cached))
+        {
+            _planCacheOrder.Remove(key);
+            _planCacheOrder.Insert(0, key);
+            return cached;
         }
         SetStatus("Loading " + Path.GetFileName(path) + "...");
         UseWaitCursor = true;
@@ -591,6 +659,8 @@ public sealed class FloorPlanPage : UserControl
                 ? await Task.Run(() => PdfPlan.Load(path, page))
                 : await Task.Run(() => DwgPlan.Load(path));
             _planCache[key] = plan;
+            _planCacheOrder.Insert(0, key);
+            TrimPlanCache();
             return plan;
         }
         catch (Exception ex)
@@ -604,18 +674,31 @@ public sealed class FloorPlanPage : UserControl
         }
     }
 
-    private async Task ShowFloorAsync(PlanFloor floor)
+    // Bumped by each ShowFloorAsync: a load that finishes after a newer one started
+    // (a big DWG takes seconds; floors can be switched meanwhile) is dropped.
+    private int _showTicket;
+
+    // Returns false if the floor couldn't be shown (the reason is in the status bar).
+    // Never throws: its callers are UI event handlers, where an exception would end
+    // the app.
+    private async Task<bool> ShowFloorAsync(PlanFloor floor)
     {
+        try
+        {
+            return await ShowFloorCoreAsync(floor);
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Could not show {floor.Name}: {ex.Message}");
+            return false;
+        }
+    }
+
+    private async Task<bool> ShowFloorCoreAsync(PlanFloor floor)
+    {
+        int ticket = ++_showTicket;
         var plan = await LoadPlanAsync(floor.DwgPath, floor.Page);
-        if (plan == null) return;
-        // The Floor list holds its own copies (rebuilt from the database), so select by
-        // Id: selecting the object passed in matched nothing and the box kept showing the
-        // previous floor (seen after a drawing was split into new floors).
-        var listed = _floorBox.Items.Cast<PlanFloor>().FirstOrDefault(f => f.Id == floor.Id);
-        _floor = listed ?? floor;
-        _plan = plan;
-        _repo.SetSetting("FloorId", floor.Id.ToString());
-        if (listed != null && _floorBox.SelectedItem != listed) _floorBox.SelectedItem = listed;
+        if (plan == null || ticket != _showTicket) return false;
 
         var sw = Stopwatch.StartNew();
         SKRect? crop = floor.HasCrop
@@ -624,12 +707,25 @@ public sealed class FloorPlanPage : UserControl
             : null;
         var picture = await Task.Run(() => plan.Record(floor.HiddenLayers, crop, Ink));
         var recordMs = sw.ElapsedMilliseconds;
+        if (ticket != _showTicket) { picture.Dispose(); return false; }
+
+        // Only now does the floor become current: until its picture is ready the old
+        // floor stays on screen, so a device dropped meanwhile lands on the floor shown.
+        // The Floor list holds its own copies (rebuilt from the database), so select by
+        // Id: selecting the object passed in matched nothing and the box kept showing the
+        // previous floor (seen after a drawing was split into new floors).
+        var listed = _floorBox.Items.Cast<PlanFloor>().FirstOrDefault(f => f.Id == floor.Id);
+        _floor = listed ?? floor;
+        _plan = plan;
+        _repo.SetSetting("FloorId", floor.Id.ToString());
+        if (listed != null && _floorBox.SelectedItem != listed) _floorBox.SelectedItem = listed;
         _canvas.SetPlan(picture, crop ?? plan.Extents);
         RefreshCanvasItems();
         _canvas.StatusText = $"{Path.GetFileName(floor.DwgPath)}  ·  {plan.Description}, floor built in {recordMs} ms";
         SetStatus("");
         _canvas.Invalidate();
         _list.Invalidate();
+        return true;
     }
 
     private void StartAreaFloor()
@@ -702,10 +798,14 @@ public sealed class FloorPlanPage : UserControl
         // Cancel is the default button: Enter must never remove floors.  Removing every
         // floor says so in as many words.
         bool everything = chosen.Count == floors.Count;
+        // Name them (the first dozen), so the confirmation shows what goes, not just how many.
+        var names = string.Join("\n", chosen.Take(12).Select(f => "  " + f.Name)) +
+                    (chosen.Count > 12 ? $"\n  ...and {chosen.Count - 12} more" : "");
         if (MessageBox.Show(this,
                 (everything ? $"Remove ALL {chosen.Count} floors" : $"Remove {chosen.Count} floor{(chosen.Count == 1 ? "" : "s")}") +
                 (devices > 0 ? $" and the {devices} device{(devices == 1 ? "" : "s")} placed on {(chosen.Count == 1 ? "it" : "them")}" : "") +
-                "?\n\n" + (everything ? "The plan will be empty until a floor plan is opened again.  " : "") + "This can’t be undone.",
+                "?\n\n" + names + "\n\n" +
+                (everything ? "The plan will be empty until a floor plan is opened again.  " : "") + "This can’t be undone.",
                 everything ? "Remove all floors" : "Remove floors",
                 MessageBoxButtons.OKCancel, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.OK) return;
 
@@ -865,26 +965,31 @@ public sealed class FloorPlanPage : UserControl
     {
         using var dlg = new OpenFileDialog { Filter = PanelConfig.FileFilter, Title = "Import panel configuration" };
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
-        _config = null;
-        await LoadConfigAsync(dlg.FileName);
-        if (_config != null) _repo.SetSetting("ConfigPath", dlg.FileName);
+        if (await LoadConfigAsync(dlg.FileName)) _repo.SetSetting("ConfigPath", dlg.FileName);
     }
 
-    private async Task LoadConfigAsync(string path)
+    // Read fully before anything is swapped in: a file that fails part-way leaves the
+    // previous configuration (devices, event routing, list) exactly as it was.
+    private async Task<bool> LoadConfigAsync(string path)
     {
         SetStatus("Reading " + Path.GetFileName(path) + "...");
         try
         {
-            _config = await Task.Run(() => PanelConfig.Load(path));
-            _devices = _config.Devices.ToDictionary(d => d.Key);
+            var config = await Task.Run(() => PanelConfig.Load(path));
+            var devices = config.Devices.GroupBy(d => d.Key).ToDictionary(g => g.Key, g => g.First());
+            _config = config;
+            _devices = devices;
             RebuildAmxIndex();
             FilterList();
             RefreshCanvasItems();
             SetStatus("");
+            return true;
         }
         catch (Exception ex)
         {
             SetStatus("Could not read the panel configuration: " + ex.Message);
+            UpdateListInfo();
+            return false;
         }
     }
 
@@ -1007,11 +1112,9 @@ public sealed class FloorPlanPage : UserControl
             $"AMX point   N{d.Node + _nodeOffset} L{d.Loop} D{d.Address}\n" +
             $"Panel       {d.Node}  {d.NodeName}\n" +
             $"Zone        {d.Zone}  {d.ZoneText}\n" +
-            $"Type        {(d.IsInput ? "input" : "")}{(d.IsInput && d.IsOutput ? " + " : "")}{(d.IsOutput ? "output" : "")}" +
-            $"{(d.Channels > 1 ? $", {d.Channels} channels" : "")}\n" +
+            $"Type        {DeviceTypeText(d)}\n" +
             $"Device code {d.CodeText}\n" +
             (_placed.TryGetValue(key, out var p) ? $"Plan        {_floors.FirstOrDefault(f => f.Id == p.FloorId)?.Name}" : "Plan        not placed yet");
-        _sDetails.Font = new Font("Consolas", 9f);
 
         var symbol = SymbolFor(d);
         _sSymbol.SelectedItem = _sSymbol.Items.Cast<SymbolChoice>().First(c => c.Symbol == symbol);
@@ -1028,6 +1131,17 @@ public sealed class FloorPlanPage : UserControl
 
         _slideTarget = 320;
         if (animate && _slide.Width < _slideTarget) _slideTimer.Start(); else _slide.Width = _slideTarget;
+    }
+
+    // "input + output, 3 channels".  An NCF doesn't record input/output, so it shows
+    // just the channels, or "not given".
+    private static string DeviceTypeText(PanelDevice d)
+    {
+        var parts = new List<string>();
+        var io = string.Join(" + ", new[] { d.IsInput ? "input" : null, d.IsOutput ? "output" : null }.Where(x => x != null));
+        if (io.Length > 0) parts.Add(io);
+        if (d.Channels > 1) parts.Add($"{d.Channels} channels");
+        return parts.Count > 0 ? string.Join(", ", parts) : "not given";
     }
 
     private void HideSlideOut()

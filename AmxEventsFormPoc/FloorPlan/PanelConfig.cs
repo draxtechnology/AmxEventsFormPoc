@@ -76,7 +76,8 @@ public sealed class PanelConfig
         using var zip = ZipFile.OpenRead(path);
 
         var nodeNames = ReadTable(zip, "tblNode")
-            .ToDictionary(r => Int(r, "NetworkAddress"), r => Str(r, "NodeName").Trim());
+            .GroupBy(r => Int(r, "NetworkAddress"))
+            .ToDictionary(g => g.Key, g => Str(g.First(), "NodeName").Trim());
         var zoneTexts = ReadTable(zip, "tblZone")
             .GroupBy(r => Int(r, "ZoneNumber"))
             .ToDictionary(g => g.Key, g => Str(g.First(), "ZoneText").Trim());

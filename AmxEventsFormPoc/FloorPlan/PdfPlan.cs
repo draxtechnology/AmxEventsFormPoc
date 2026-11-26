@@ -10,7 +10,7 @@ namespace AmxEventsFormPoc.FloorPlan;
 // What a floor's background is drawn from: a DWG drawing (DwgPlan) or a PDF page
 // (PdfPlan). Coordinates are the source's own units with Y up, relative to Origin,
 // so placed devices are stored against the drawing and never against the screen.
-public interface IPlanSource
+public interface IPlanSource : IDisposable
 {
     string Path { get; }
     SKRect Extents { get; }
@@ -28,6 +28,14 @@ public interface IPlanSource
 // way; 4,500 pixels on the long side keeps a plan clear at normal zooms.
 public sealed class PdfPlan : IPlanSource
 {
+    // The rendered page is the big allocation (tens of MB); free it when the plan
+    // leaves the cache.  A picture already recorded from it keeps its own reference.
+    public void Dispose()
+    {
+        _image?.Dispose();
+        _image = null;
+    }
+
     private const int LongSide = 4500;
     private const int ShortSide = 4500;
     private static readonly object PdfiumLock = new(); // PDFium isn't thread-safe

@@ -174,19 +174,26 @@ public sealed class FloorNamingDialog : Form
             {
                 foreach (var f in _files)
                 {
-                    foreach (var (page, thumb) in PdfPlan.ReadPagePreviews(f.Path, ThumbW * 2, ThumbH * 2, token))
+                    // One file failing to render (moved since it was picked, damaged)
+                    // costs only its previews: its rows stay, blank, and can still be named.
+                    try
                     {
-                        if (token.IsCancellationRequested || IsDisposed) { thumb.Dispose(); return; }
-                        var path = f.Path;
-                        BeginInvoke(() => ShowPreview(path, page, thumb));
-                        if (f.Duplicate != null) break; // one preview is enough for a skipped file
+                        foreach (var (page, thumb) in PdfPlan.ReadPagePreviews(f.Path, ThumbW * 2, ThumbH * 2, token))
+                        {
+                            if (token.IsCancellationRequested || IsDisposed) { thumb.Dispose(); return; }
+                            var path = f.Path;
+                            BeginInvoke(() => ShowPreview(path, page, thumb));
+                            if (f.Duplicate != null) break; // one preview is enough for a skipped file
+                        }
                     }
+                    catch (Exception) when (!token.IsCancellationRequested && !IsDisposed) { }
                 }
             }, token);
         }
         catch (OperationCanceledException) { }
         catch (ObjectDisposedException) { }
         catch (InvalidOperationException) { } // closed while a preview was on its way
+        catch (Exception) { }                 // never let a preview failure reach the UI thread
     }
 
     private void ShowPreview(string path, int page, Bitmap thumb)

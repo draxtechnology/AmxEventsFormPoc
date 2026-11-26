@@ -53,7 +53,7 @@ internal static class NcfReader
                 points.Add((node, p.Loop, p.Address, p.Sub, p.Zone, p.Type, p.Text));
         }
 
-        var names = panels.ToDictionary(p => p.Node, p => p.Name);
+        var names = panels.GroupBy(p => p.Node).ToDictionary(g => g.Key, g => g.First().Name);
         var devices = points
             .GroupBy(p => (p.Node, p.Loop, p.Address))
             .Select(g =>

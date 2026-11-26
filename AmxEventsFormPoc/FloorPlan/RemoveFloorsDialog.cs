@@ -13,7 +13,7 @@ namespace AmxEventsFormPoc.FloorPlan;
 // the page confirms with the totals before removing anything.
 public sealed class RemoveFloorsDialog : Form
 {
-    private readonly TreeView _tree = new() { Dock = DockStyle.Fill, CheckBoxes = true, ShowLines = true, FullRowSelect = true };
+    private readonly TreeView _tree = new NoDoubleClickTreeView { Dock = DockStyle.Fill, CheckBoxes = true, ShowLines = true, FullRowSelect = true };
     private readonly CheckBox _all = new() { Text = "Select all", AutoSize = true, Dock = DockStyle.Left, Padding = new Padding(8, 0, 0, 0) };
     private readonly Label _summary = new() { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, ForeColor = Color.DimGray };
     private readonly Button _remove = new() { Text = "Remove...", Dock = DockStyle.Fill, Enabled = false };
@@ -73,7 +73,15 @@ public sealed class RemoveFloorsDialog : Form
         bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
         bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
         var cancel = new Button { Text = "Cancel", Dock = DockStyle.Fill, DialogResult = DialogResult.Cancel };
-        _remove.Click += (_, _) => { DialogResult = DialogResult.OK; Close(); };
+        // Re-read the ticks at the moment Remove is pressed, rather than trusting the
+        // list kept up by AfterCheck.
+        _remove.Click += (_, _) =>
+        {
+            UpdateSummary();
+            if (Selected.Count == 0) return;
+            DialogResult = DialogResult.OK;
+            Close();
+        };
         bottom.Controls.Add(_all, 0, 0);
         bottom.Controls.Add(_summary, 1, 0);
         bottom.Controls.Add(_remove, 2, 0);
@@ -119,5 +127,18 @@ public sealed class RemoveFloorsDialog : Form
         int devices = Selected.Sum(f => _devices.TryGetValue(f.Id, out var n) ? n : 0);
         _summary.Text = Selected.Count == 0 ? "" : $"{Selected.Count} floor{(Selected.Count == 1 ? "" : "s")}, {devices} placed device{(devices == 1 ? "" : "s")}";
         _remove.Enabled = Selected.Count > 0;
+    }
+
+    // A WinForms TreeView with check boxes toggles a box on double-click without
+    // raising AfterCheck for the second toggle, so what's shown and what's selected
+    // can disagree.  Swallow the double-click; single clicks work as normal.
+    private sealed class NoDoubleClickTreeView : TreeView
+    {
+        protected override void WndProc(ref Message m)
+        {
+            const int WM_LBUTTONDBLCLK = 0x0203;
+            if (m.Msg == WM_LBUTTONDBLCLK) m.Msg = 0x0201; // treat as a single click
+            base.WndProc(ref m);
+        }
     }
 }

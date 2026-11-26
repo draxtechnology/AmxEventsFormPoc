@@ -20,6 +20,10 @@ namespace AmxEventsFormPoc.FloorPlan;
 // there, so everything is shifted near zero first.
 public sealed class DwgPlan : IPlanSource
 {
+    // Plain managed arrays: nothing native to free, the GC takes them once the plan
+    // leaves the cache.
+    public void Dispose() { }
+
     public string Path { get; }
     public SKRect Extents { get; private set; }      // where most of the drawing is (stray far-off objects ignored)
     public IReadOnlyList<PlanLayer> Layers => _layers;
