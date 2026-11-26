@@ -47,6 +47,7 @@ public sealed class FloorPlanPage : UserControl
     private readonly ToolStrip _tools = new() { GripStyle = ToolStripGripStyle.Hidden, Dock = DockStyle.Top, Padding = new Padding(4, 2, 4, 2) };
     private readonly ToolStripComboBox _floorBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 200 };
     private readonly ToolStripButton _editButton = new("Edit") { CheckOnClick = true, Checked = true, ToolTipText = "Drag devices from the list onto the plan, and move them" };
+    private readonly ToolStripButton _gridButton = new("Grid on") { CheckOnClick = true, Checked = true, Enabled = false, ToolTipText = "Show or hide the drawing’s grid lines" };
     private readonly ToolStripButton _followButton = new("Follow alarms") { CheckOnClick = true, Checked = true, ToolTipText = "Zoom to a device and open its details when it goes into alarm" };
     private readonly ToolStripButton _undockButton = new("Undock") { ToolTipText = "Open the plan in its own window, for a second screen" };
     private readonly ToolStripLabel _status = new() { ForeColor = Color.DimGray };
@@ -162,8 +163,16 @@ public sealed class FloorPlanPage : UserControl
     // the page is showing, so device states are current when it is opened.
     public void OnEvent(DraxEventRow row)
     {
+        // What this device was before the event, to spot the last alarm clearing.
+        var before = _byAmxPoint.TryGetValue((row.Node, row.Loop, row.Input), out var dev)
+                     && _states.TryGetValue(dev.Key, out var b) ? b : DeviceState.Normal;
+
         var key = Apply(row);
-        if (key == null) return;
+        if (key == null)
+        {
+            if (IsResetMessage(row)) ZoomOutAfterReset();
+            return;
+        }
         var state = _states.TryGetValue(key, out var st) ? st : DeviceState.Normal;
 
         RefreshCanvasItems();
@@ -174,6 +183,28 @@ public sealed class FloorPlanPage : UserControl
         {
             _ = FollowAlarmAsync(key, placed);
         }
+        else if (IsResetMessage(row) ||
+                 (!row.On && before is DeviceState.Alarm or DeviceState.PreAlarm && !AnyAlarmActive()))
+        {
+            ZoomOutAfterReset();
+        }
+    }
+
+    // A panel reset clears its alarms (the last one clearing is the usual sign); some
+    // panels also send a momentary "Fire Reset" message.
+    private static bool IsResetMessage(DraxEventRow row) =>
+        row.On && (row.Type + " " + row.Text + " " + row.Text2 + " " + row.Text3)
+            .Contains("RESET", StringComparison.OrdinalIgnoreCase);
+
+    private bool AnyAlarmActive() =>
+        _states.Values.Any(s => s is DeviceState.Alarm or DeviceState.PreAlarm);
+
+    // After a reset, back out to the whole floor and close the device's details.
+    private void ZoomOutAfterReset()
+    {
+        if (!_followButton.Checked || _plan == null) return;
+        _canvas.AnimateFit();
+        if (_slideKey != null) HideSlideOut();
     }
 
     private static DeviceState StateFor(DraxEventRow row)
@@ -222,6 +253,8 @@ public sealed class FloorPlanPage : UserControl
         plan.DropDownItems.Add("Import panel configuration (SKF or NCF)...", null, async (_, _) => await ImportConfigAsync());
         plan.DropDownItems.Add(new ToolStripSeparator());
         plan.DropDownItems.Add("New floor from an area of this drawing", null, (_, _) => StartAreaFloor());
+        plan.DropDownItems.Add("Crop floor to view", null, async (_, _) => await CropToViewAsync());
+        plan.DropDownItems.Add("Show the whole drawing again", null, async (_, _) => await UncropAsync());
         plan.DropDownItems.Add("Rename floor...", null, (_, _) => RenameFloor());
         plan.DropDownItems.Add("Remove this floor", null, (_, _) => RemoveFloor());
         plan.DropDownItems.Add("Remove floors...", null, (_, _) => RemoveFloors());
@@ -231,7 +264,12 @@ public sealed class FloorPlanPage : UserControl
         plan.DropDownItems.Add("AMX node offset...", null, (_, _) => SetNodeOffset());
 
         var fit = new ToolStripButton("Fit") { ToolTipText = "Show the whole floor" };
-        fit.Click += (_, _) => _canvas.FitToContent();
+        fit.Click += (_, _) => _canvas.AnimateFit();
+        var zoomIn = new ToolStripButton(" + ") { ToolTipText = "Zoom in", Font = new Font("Segoe UI", 10f, FontStyle.Bold) };
+        zoomIn.Click += (_, _) => _canvas.ZoomBy(1.5f);
+        var zoomOut = new ToolStripButton(" − ") { ToolTipText = "Zoom out", Font = new Font("Segoe UI", 10f, FontStyle.Bold) };
+        zoomOut.Click += (_, _) => _canvas.ZoomBy(1 / 1.5f);
+        _gridButton.CheckedChanged += async (_, _) => await ToggleGridAsync();
         _floorBox.SelectedIndexChanged += async (_, _) =>
         {
             if (_floorBox.SelectedItem is PlanFloor f && f.Id != _floor?.Id) await ShowFloorAsync(f);
@@ -242,7 +280,7 @@ public sealed class FloorPlanPage : UserControl
 
         _tools.Items.AddRange(new ToolStripItem[]
         {
-            plan, new ToolStripSeparator(), new ToolStripLabel("Floor"), _floorBox, fit,
+            plan, new ToolStripSeparator(), new ToolStripLabel("Floor"), _floorBox, fit, zoomIn, zoomOut, _gridButton,
             new ToolStripSeparator(), _editButton, _followButton, _undockButton, new ToolStripSeparator(), _status,
         });
     }
@@ -704,7 +742,11 @@ public sealed class FloorPlanPage : UserControl
         SKRect? crop = floor.HasCrop
             ? new SKRect((float)(floor.CropLeft!.Value - plan.OriginX), (float)(floor.CropBottom!.Value - plan.OriginY),
                          (float)(floor.CropRight!.Value - plan.OriginX), (float)(floor.CropTop!.Value - plan.OriginY))
-            : null;
+            : IsPdf(floor.DwgPath) ? null
+            // A DWG floor without its own crop is drawn only within the plan area Fit
+            // shows: legends, title blocks and stray annotation outside it (Level 00's
+            // legend) don't appear when zooming out.
+            : plan.Extents;
         var picture = await Task.Run(() => plan.Record(floor.HiddenLayers, crop, Ink));
         var recordMs = sw.ElapsedMilliseconds;
         if (ticket != _showTicket) { picture.Dispose(); return false; }
@@ -720,12 +762,79 @@ public sealed class FloorPlanPage : UserControl
         _repo.SetSetting("FloorId", floor.Id.ToString());
         if (listed != null && _floorBox.SelectedItem != listed) _floorBox.SelectedItem = listed;
         _canvas.SetPlan(picture, crop ?? plan.Extents);
+        UpdateGridButton();
         RefreshCanvasItems();
         _canvas.StatusText = $"{Path.GetFileName(floor.DwgPath)}  ·  {plan.Description}, floor built in {recordMs} ms";
         SetStatus("");
         _canvas.Invalidate();
         _list.Invalidate();
         return true;
+    }
+
+    // Grid layers: any layer whose name has GRID in it (S-GRID, S-GRID-IDEN...).
+    private List<string> GridLayers() =>
+        _plan?.Layers.Where(l => l.Name.Contains("GRID", StringComparison.OrdinalIgnoreCase)).Select(l => l.Name).ToList()
+        ?? new List<string>();
+
+    private bool _updatingGrid;
+
+    private void UpdateGridButton()
+    {
+        var grid = GridLayers();
+        _updatingGrid = true;
+        _gridButton.Enabled = grid.Count > 0;
+        _gridButton.Checked = grid.Count == 0 || grid.Any(n => !(_floor?.HiddenLayers.Contains(n) ?? false));
+        // A PDF has no layers, so its grid lines can't be told apart from the rest.
+        _gridButton.ToolTipText = grid.Count > 0 ? "Show or hide the drawing’s grid lines"
+            : _plan?.Layers.Count == 0 ? "A PDF has no layers, so its grid lines can’t be switched off"
+            : "This drawing has no grid layers";
+        GridButtonText();
+        _updatingGrid = false;
+    }
+
+    // Says which state it's in: a pressed/unpressed toolbar button is easy to misread.
+    private void GridButtonText() =>
+        _gridButton.Text = !_gridButton.Enabled ? "Grid" : _gridButton.Checked ? "Grid on" : "Grid off";
+
+    // Switches the floor's grid layers on or off, remembered for the floor.
+    private async Task ToggleGridAsync()
+    {
+        if (_updatingGrid || _floor == null) return;
+        GridButtonText();
+        var grid = GridLayers();
+        if (grid.Count == 0) return;
+        foreach (var n in grid)
+        {
+            if (_gridButton.Checked) _floor.HiddenLayers.Remove(n);
+            else _floor.HiddenLayers.Add(n);
+        }
+        _repo.SaveFloor(_floor);
+        await ShowFloorAsync(_floor);
+    }
+
+    // Crop the floor to what's on screen now: for a drawing whose plan area isn't
+    // picked up right, zoom to the plan and crop.
+    private async Task CropToViewAsync()
+    {
+        if (_floor == null || _plan == null) { SetStatus("Open a floor plan first."); return; }
+        var v = _canvas.VisibleArea;
+        if (v.Width <= 0 || v.Height <= 0) return;
+        _floor.CropLeft = v.Left + _plan.OriginX;
+        _floor.CropBottom = v.Top + _plan.OriginY;     // SKRect Top is the low Y here (plan Y is up)
+        _floor.CropRight = v.Right + _plan.OriginX;
+        _floor.CropTop = v.Bottom + _plan.OriginY;
+        _repo.SaveFloor(_floor);
+        await ShowFloorAsync(_floor);
+        SetStatus($"{_floor.Name} cropped to the view.  Plan > Show the whole drawing again undoes it.");
+    }
+
+    private async Task UncropAsync()
+    {
+        if (_floor == null) { SetStatus("Open a floor plan first."); return; }
+        if (!_floor.HasCrop) { SetStatus($"{_floor.Name} already shows the whole drawing."); return; }
+        _floor.CropLeft = _floor.CropBottom = _floor.CropRight = _floor.CropTop = null;
+        _repo.SaveFloor(_floor);
+        await ShowFloorAsync(_floor);
     }
 
     private void StartAreaFloor()

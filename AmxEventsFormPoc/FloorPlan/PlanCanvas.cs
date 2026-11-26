@@ -109,10 +109,45 @@ public sealed class PlanCanvas : Control
         if (_content.Width <= 0 || _content.Height <= 0) return;
         if (!Visible || Width < 200 || Height < 150) { _fitPending = true; return; }
         _fitPending = false;
-        _scale = Math.Min(Width / _content.Width, Height / _content.Height) * 0.95f;
+        _scale = FitScale;
         _cx = _content.MidX;
         _cy = _content.MidY;
         ViewChanged(immediate: true);
+    }
+
+    // The scale at which the whole floor fits the window.
+    private float FitScale => Math.Min(Width / _content.Width, Height / _content.Height) * 0.95f;
+
+    // Zooming out stops a little beyond the whole floor: further out there's nothing
+    // to see but the floor shrinking to a dot.
+    private float MinScale => FitScale * 0.6f;
+
+    // Smoothly back to the whole floor (after a reset, or the Fit button).
+    public void AnimateFit()
+    {
+        if (_content.Width <= 0 || _content.Height <= 0 || Width < 200 || Height < 150) { FitToContent(); return; }
+        _anim = (_scale, _cx, _cy, FitScale, _content.MidX, _content.MidY, DateTime.Now);
+        _animTimer.Start();
+    }
+
+    // The + and - buttons: zoom about the centre of the view.
+    public void ZoomBy(float factor)
+    {
+        if (_picture == null) return;
+        float target = Math.Max(MinScale, _scale * factor);
+        _anim = (_scale, _cx, _cy, target, _cx, _cy, DateTime.Now);
+        _animTimer.Start();
+    }
+
+    // The part of the plan on screen now, in plan coordinates (Top is the low Y).
+    public SKRect VisibleArea
+    {
+        get
+        {
+            var a = ScreenToPlan(new Point(0, Height));
+            var b = ScreenToPlan(new Point(Width, 0));
+            return new SKRect(a.X, a.Y, b.X, b.Y);
+        }
     }
 
     // Smoothly zooms to a point, used when a device goes into alarm. Zooms so roughly
@@ -393,7 +428,7 @@ public sealed class PlanCanvas : Control
         base.OnMouseWheel(e);
         _anim = null;
         var before = ScreenToPlan(e.Location);
-        _scale *= (float)Math.Pow(1.2, e.Delta / 120.0);
+        _scale = Math.Max(MinScale, _scale * (float)Math.Pow(1.2, e.Delta / 120.0));
         // Keep the point under the cursor where it is.
         var after = ScreenToPlan(e.Location);
         _cx += before.X - after.X;
