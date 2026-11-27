@@ -45,7 +45,7 @@ public sealed class FloorPlanPage : UserControl
 
     // --- controls ---
     private readonly ToolStrip _tools = new() { GripStyle = ToolStripGripStyle.Hidden, Dock = DockStyle.Top, Padding = new Padding(4, 2, 4, 2) };
-    private readonly ToolStripComboBox _floorBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 200 };
+    private readonly ToolStripComboBox _floorBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, AutoSize = false, Width = 600 };
     private readonly ToolStripButton _editButton = new("Edit") { CheckOnClick = true, Checked = true, ToolTipText = "Drag devices from the list onto the plan, and move them" };
     private readonly ToolStripButton _gridButton = new("Grid on") { CheckOnClick = true, Checked = true, Enabled = false, ToolTipText = "Show or hide the drawing’s grid lines" };
     private readonly ToolStripButton _followButton = new("Follow alarms") { CheckOnClick = true, Checked = true, ToolTipText = "Zoom to a device and open its details when it goes into alarm" };
