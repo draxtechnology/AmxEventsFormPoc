@@ -24,6 +24,10 @@ public sealed class PlanFloor
     public double? CropRight { get; set; }
     public double? CropTop { get; set; }
     public HashSet<string> HiddenLayers { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    // Quarter turns clockwise (0, 90, 180, 270) a PDF page is shown at, for a sheet
+    // drawn or scanned sideways.  The crop and placed devices are kept in the turned
+    // page's coordinates, so they move with it when it's turned.
+    public int Rotation { get; set; }
     public bool HasCrop => CropLeft.HasValue && CropBottom.HasValue && CropRight.HasValue && CropTop.HasValue;
     public override string ToString() => Name;
 }
@@ -97,6 +101,7 @@ public sealed class FloorPlanRepository : IDisposable
             """);
         AddColumnIfMissing("PlanFloors", "Page", "INTEGER NOT NULL DEFAULT 0");
         AddColumnIfMissing("PlanFloors", "FileHash", "TEXT NOT NULL DEFAULT ''");
+        AddColumnIfMissing("PlanFloors", "Rotation", "INTEGER NOT NULL DEFAULT 0");
     }
 
     // PlanFloors gained Page for PDF floors; add it to a database made before that.
@@ -112,7 +117,7 @@ public sealed class FloorPlanRepository : IDisposable
     public List<PlanFloor> GetFloors()
     {
         using var cmd = _connection.CreateCommand();
-        cmd.CommandText = "SELECT Id, Name, DwgPath, CropLeft, CropBottom, CropRight, CropTop, HiddenLayers, Page, FileHash FROM PlanFloors ORDER BY Id";
+        cmd.CommandText = "SELECT Id, Name, DwgPath, CropLeft, CropBottom, CropRight, CropTop, HiddenLayers, Page, FileHash, Rotation FROM PlanFloors ORDER BY Id";
         using var r = cmd.ExecuteReader();
         var list = new List<PlanFloor>();
         while (r.Read())
@@ -130,6 +135,7 @@ public sealed class FloorPlanRepository : IDisposable
                     r.GetString(7).Split('\n', StringSplitOptions.RemoveEmptyEntries), StringComparer.OrdinalIgnoreCase),
                 Page = r.GetInt32(8),
                 FileHash = r.GetString(9),
+                Rotation = r.GetInt32(10),
             });
         }
         return list;
@@ -139,8 +145,8 @@ public sealed class FloorPlanRepository : IDisposable
     {
         using var cmd = _connection.CreateCommand();
         cmd.CommandText = f.Id == 0
-            ? "INSERT INTO PlanFloors (Name, DwgPath, CropLeft, CropBottom, CropRight, CropTop, HiddenLayers, Page, FileHash) VALUES ($n, $p, $l, $b, $r, $t, $h, $pg, $fh); SELECT last_insert_rowid();"
-            : "UPDATE PlanFloors SET Name=$n, DwgPath=$p, CropLeft=$l, CropBottom=$b, CropRight=$r, CropTop=$t, HiddenLayers=$h, Page=$pg, FileHash=$fh WHERE Id=$id; SELECT $id;";
+            ? "INSERT INTO PlanFloors (Name, DwgPath, CropLeft, CropBottom, CropRight, CropTop, HiddenLayers, Page, FileHash, Rotation) VALUES ($n, $p, $l, $b, $r, $t, $h, $pg, $fh, $rot); SELECT last_insert_rowid();"
+            : "UPDATE PlanFloors SET Name=$n, DwgPath=$p, CropLeft=$l, CropBottom=$b, CropRight=$r, CropTop=$t, HiddenLayers=$h, Page=$pg, FileHash=$fh, Rotation=$rot WHERE Id=$id; SELECT $id;";
         cmd.Parameters.AddWithValue("$id", f.Id);
         cmd.Parameters.AddWithValue("$n", f.Name);
         cmd.Parameters.AddWithValue("$p", f.DwgPath);
@@ -151,6 +157,7 @@ public sealed class FloorPlanRepository : IDisposable
         cmd.Parameters.AddWithValue("$h", string.Join("\n", f.HiddenLayers));
         cmd.Parameters.AddWithValue("$pg", f.Page);
         cmd.Parameters.AddWithValue("$fh", f.FileHash ?? "");
+        cmd.Parameters.AddWithValue("$rot", f.Rotation);
         f.Id = Convert.ToInt64(cmd.ExecuteScalar());
     }
 

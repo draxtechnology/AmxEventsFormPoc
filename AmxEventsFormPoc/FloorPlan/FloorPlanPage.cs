@@ -255,6 +255,8 @@ public sealed class FloorPlanPage : UserControl
         plan.DropDownItems.Add("New floor from an area of this drawing", null, (_, _) => StartAreaFloor());
         plan.DropDownItems.Add("Crop floor to view", null, async (_, _) => await CropToViewAsync());
         plan.DropDownItems.Add("Show the whole drawing again", null, async (_, _) => await UncropAsync());
+        plan.DropDownItems.Add("Rotate floor clockwise", null, async (_, _) => await RotateFloorAsync(clockwise: true));
+        plan.DropDownItems.Add("Rotate floor anticlockwise", null, async (_, _) => await RotateFloorAsync(clockwise: false));
         plan.DropDownItems.Add("Rename floor...", null, (_, _) => RenameFloor());
         plan.DropDownItems.Add("Remove this floor", null, (_, _) => RemoveFloor());
         plan.DropDownItems.Add("Remove floors...", null, (_, _) => RemoveFloors());
@@ -512,7 +514,9 @@ public sealed class FloorPlanPage : UserControl
             return;
         }
 
-        var newPlan = await LoadPlanAsync(path, page);
+        // At the floor's turn, so the size check below compares like with like and a
+        // new revision of a sideways sheet comes in turned the same way.
+        var newPlan = await LoadPlanAsync(path, page, stored.Rotation);
         if (newPlan == null) return;
 
         float sx = 1, sy = 1;
@@ -673,7 +677,7 @@ public sealed class FloorPlanPage : UserControl
         }
     }
 
-    private async Task<IPlanSource?> LoadPlanAsync(string path, int page)
+    private async Task<IPlanSource?> LoadPlanAsync(string path, int page, int rotation = 0)
     {
         if (!File.Exists(path))
         {
@@ -682,7 +686,7 @@ public sealed class FloorPlanPage : UserControl
         }
         // Keyed on the file as it is now: a revision saved over the old file at the same
         // path has a new write time, so it's read again rather than served stale.
-        var key = path + "|" + page + "|" + File.GetLastWriteTimeUtc(path).Ticks;
+        var key = path + "|" + page + "|" + rotation + "|" + File.GetLastWriteTimeUtc(path).Ticks;
         if (_planCache.TryGetValue(key, out var cached))
         {
             _planCacheOrder.Remove(key);
@@ -694,7 +698,7 @@ public sealed class FloorPlanPage : UserControl
         try
         {
             IPlanSource plan = IsPdf(path)
-                ? await Task.Run(() => PdfPlan.Load(path, page))
+                ? await Task.Run(() => PdfPlan.Load(path, page, rotation))
                 : await Task.Run(() => DwgPlan.Load(path));
             _planCache[key] = plan;
             _planCacheOrder.Insert(0, key);
@@ -735,7 +739,7 @@ public sealed class FloorPlanPage : UserControl
     private async Task<bool> ShowFloorCoreAsync(PlanFloor floor)
     {
         int ticket = ++_showTicket;
-        var plan = await LoadPlanAsync(floor.DwgPath, floor.Page);
+        var plan = await LoadPlanAsync(floor.DwgPath, floor.Page, IsPdf(floor.DwgPath) ? floor.Rotation : 0);
         if (plan == null || ticket != _showTicket) return false;
 
         var sw = Stopwatch.StartNew();
@@ -828,6 +832,49 @@ public sealed class FloorPlanPage : UserControl
         SetStatus($"{_floor.Name} cropped to the view.  Plan > Show the whole drawing again undoes it.");
     }
 
+    // Turns a PDF floor a quarter turn, for a sheet drawn or scanned sideways.  The
+    // crop and the devices placed on the floor turn with it, so nothing needs placing
+    // again.  A DWG is drawn the right way up already.
+    private async Task RotateFloorAsync(bool clockwise)
+    {
+        if (_floor == null || _plan == null) { SetStatus("Open a floor plan first."); return; }
+        if (!IsPdf(_floor.DwgPath)) { SetStatus("Rotate is for PDF floors: a DWG is already drawn the right way up."); return; }
+
+        var floor = _floor;
+        // The page as shown now, in plan coordinates (Y up, from 0,0).
+        double w = _plan.Extents.Width, h = _plan.Extents.Height;
+        // Clockwise the left edge becomes the top: (x, y) -> (y, w - x).
+        // Anticlockwise the bottom edge becomes the right: (x, y) -> (h - y, x).
+        (double X, double Y) Turn(double x, double y) => clockwise ? (y, w - x) : (h - y, x);
+
+        if (floor.HasCrop)
+        {
+            var a = Turn(floor.CropLeft!.Value, floor.CropBottom!.Value);
+            var b = Turn(floor.CropRight!.Value, floor.CropTop!.Value);
+            floor.CropLeft = Math.Min(a.X, b.X);
+            floor.CropRight = Math.Max(a.X, b.X);
+            floor.CropBottom = Math.Min(a.Y, b.Y);
+            floor.CropTop = Math.Max(a.Y, b.Y);
+        }
+        floor.Rotation = PdfPlan.NormaliseRotation(floor.Rotation + (clockwise ? 90 : -90));
+        _repo.SaveFloor(floor);
+
+        int moved = 0;
+        foreach (var p in _placed.Values.Where(p => p.FloorId == floor.Id).ToList())
+        {
+            var t = Turn(p.X, p.Y);
+            var turned = p with { X = t.X, Y = t.Y };
+            _repo.PlaceDevice(turned);
+            _placed[p.Key] = turned;
+            moved++;
+        }
+
+        if (await ShowFloorAsync(floor))
+            SetStatus($"{floor.Name} turned {(clockwise ? "clockwise" : "anticlockwise")}" +
+                      (floor.Rotation != 0 ? $" ({floor.Rotation}° from the PDF)" : " (back as the PDF has it)") +
+                      (moved > 0 ? $"; {moved} placed device{(moved == 1 ? "" : "s")} turned with it." : "."));
+    }
+
     private async Task UncropAsync()
     {
         if (_floor == null) { SetStatus("Open a floor plan first."); return; }
@@ -854,6 +901,7 @@ public sealed class FloorPlanPage : UserControl
             Name = name.Trim(),
             DwgPath = _floor.DwgPath,
             Page = _floor.Page,
+            Rotation = _floor.Rotation,   // the area was drawn on the page as turned
             CropLeft = area.Left + _plan.OriginX,
             CropBottom = area.Top + _plan.OriginY,     // SKRect Top is the low Y here (plan Y is up)
             CropRight = area.Right + _plan.OriginX,

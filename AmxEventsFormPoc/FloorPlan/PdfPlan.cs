@@ -42,6 +42,7 @@ public sealed class PdfPlan : IPlanSource
 
     public string Path { get; }
     public int Page { get; }             // 0-based
+    public int Rotation { get; }         // degrees clockwise: 0, 90, 180 or 270
     public int PageCount { get; private set; }
     public SKRect Extents { get; private set; }
     public double OriginX => 0;
@@ -51,11 +52,15 @@ public sealed class PdfPlan : IPlanSource
 
     private SKImage? _image;
 
-    private PdfPlan(string path, int page)
+    private PdfPlan(string path, int page, int rotation)
     {
         Path = path;
         Page = page;
+        Rotation = rotation;
     }
+
+    // 0, 90, 180 or 270 for any whole number of degrees (-90 is 270).
+    public static int NormaliseRotation(int degrees) => ((degrees / 90 % 4) + 4) % 4 * 90;
 
     public static int CountPages(string path)
     {
@@ -66,9 +71,13 @@ public sealed class PdfPlan : IPlanSource
         }
     }
 
-    public static PdfPlan Load(string path, int page)
+    // rotation turns the page clockwise (0, 90, 180 or 270): the plan's extents and
+    // coordinates are then those of the turned page.
+    public static PdfPlan Load(string path, int page, int rotation = 0)
     {
-        var plan = new PdfPlan(path, page);
+        rotation = NormaliseRotation(rotation);
+        bool sideways = rotation == 90 || rotation == 270;
+        var plan = new PdfPlan(path, page, rotation);
         var sw = Stopwatch.StartNew();
         lock (PdfiumLock)
         {
@@ -83,7 +92,7 @@ public sealed class PdfPlan : IPlanSource
                 w = pr.GetPageWidth();
                 h = pr.GetPageHeight();
             }
-            plan.Extents = new SKRect(0, 0, w, h);
+            plan.Extents = sideways ? new SKRect(0, 0, h, w) : new SKRect(0, 0, w, h);
 
             // Rendered to fit LongSide x ShortSide, aspect kept.
             using var big = DocLib.Instance.GetDocReader(path, new PageDimensions(ShortSide, LongSide));
@@ -94,11 +103,21 @@ public sealed class PdfPlan : IPlanSource
             // PDFium leaves unpainted areas transparent: put the page on white.
             var info = new SKImageInfo(pw, ph, SKColorType.Bgra8888, SKAlphaType.Unpremul);
             using var raw = SKImage.FromPixelCopy(info, bgra);
-            using var surface = SKSurface.Create(new SKImageInfo(pw, ph, SKColorType.Bgra8888, SKAlphaType.Premul));
+            // Turned in the same pass: a quarter turn of the pixels loses nothing.
+            int iw = sideways ? ph : pw, ih = sideways ? pw : ph;
+            using var surface = SKSurface.Create(new SKImageInfo(iw, ih, SKColorType.Bgra8888, SKAlphaType.Premul));
             surface.Canvas.Clear(SKColors.White);
+            switch (rotation)
+            {
+                case 90: surface.Canvas.Translate(iw, 0); break;
+                case 180: surface.Canvas.Translate(iw, ih); break;
+                case 270: surface.Canvas.Translate(0, ih); break;
+            }
+            surface.Canvas.RotateDegrees(rotation);
             surface.Canvas.DrawImage(raw, 0, 0, new SKSamplingOptions(SKFilterMode.Nearest), null);
             plan._image = surface.Snapshot();
-            plan.Description = $"PDF page {page + 1} of {plan.PageCount}, rendered {pw:N0} x {ph:N0} px in {sw.Elapsed.TotalSeconds:F1} s";
+            plan.Description = $"PDF page {page + 1} of {plan.PageCount}, rendered {pw:N0} x {ph:N0} px in {sw.Elapsed.TotalSeconds:F1} s" +
+                               (rotation != 0 ? $", turned {rotation}°" : "");
         }
         return plan;
     }
